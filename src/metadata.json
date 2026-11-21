@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "KWin/Script",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "TaskbarPlant"
+            }
+        ],
+        "Description": "Pushes window frame geometry to TaskbarPlant so the pots can stand on window title bars",
+        "Description[zh_CN]": "把窗口外框几何推送给桌面电子盆栽，让花盆能站在窗口标题栏上",
+        "Icon": "preferences-system-windows-script-test",
+        "Id": "taskbarplant-geometry",
+        "License": "MIT",
+        "Name": "TaskbarPlant Geometry Bridge",
+        "Name[zh_CN]": "桌面电子盆栽 · 窗口几何桥",
+        "Version": "1.0"
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js"
+}

@@ -1,0 +1,7 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>kwin_bridge.js</file>
+        <file>metadata.json</file>
+    </qresource>
+</RCC>

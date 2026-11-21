@@ -1,0 +1,19 @@
+# 构建产物
+build/
+build-*/
+*.o
+*.so
+*.a
+
+# IDE
+.idea/
+.vscode/
+*.user
+compile_commands.json
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 运行时
+*.log
