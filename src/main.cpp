@@ -716,6 +716,7 @@ struct Pot {
     float     supportWidth = 0;   // 上一帧承托面宽度（用于识别"还是同一个窗口"）
     float     prevLowestAbs = -1e9f; // 上一帧最低点；spawnPot 里会初始化成实际位置
     float     uprightDelay = 0.0f;   // 摔倒静止后已经躺了多久（秒）
+    bool      rising = false;        // 正在从翻车状态爬起来（期间不应用失稳逻辑）
     bool      everSupported = false;
 };
 
@@ -1728,6 +1729,12 @@ void Garden::beginDrag(int idx, float mx, float my)
     p.dragOffX = mx - p.body.x;
     p.dragOffY = my - p.body.y;
     p.body.angVel *= 0.2f;
+
+    // 抓住花盆就打断上一轮的"躺倒 / 爬起"状态。
+    // 不清的话，之前爬起来过的那盆，rising 会一直是 true，
+    // 之后无论拖到多斜的角度松手都会被"爬起"分支强行立正。
+    p.uprightDelay = 0.0f;
+    p.rising = false;
 }
 
 void Garden::dragTo(float mx, float my)
@@ -1883,38 +1890,81 @@ void Garden::updatePot(Pot& p, float dt)
             if (fabsf(b.vy) < 55.0f * g_scale) b.vy = 0.0f;
             b.vx *= 0.90f;
             b.angVel += b.vx * 0.0016f;
-            if (impact > 1000.0f * g_scale) b.angVel += 0.4f;
+            // 重摔时再补一点旋转。必须按当前转向取符号 ——
+            // 原来是无条件 += 0.4f（恒为正），结果只有往右摔能躺平，
+            // 往左摔会被这个正向角速度顶回去，看着像"站起来了"。
+            if (impact > 1000.0f * g_scale)
+                b.angVel += 0.4f * (b.angVel >= 0.0f ? 1.0f : -1.0f);
             b.angVel = Clampf(b.angVel, -9.0f, 9.0f);
         }
 
         if (!b.dragged) {
             b.vx *= 0.93f;
-            b.angVel *= 0.86f;
             if (fabsf(b.vx) < 2.0f * g_scale) b.vx = 0.0f;
-            if (fabsf(b.angVel) < 0.03f) b.angVel = 0.0f;
 
             // ------------------------------------------------------------------
-            //  摔倒后先躺一会儿再立起来
+            //  自动回正：三种情况
             //
-            //  原版是每帧按 15% 指数回正，半秒就直了，看不出"摔了一跤"。
-            //  这里改成：明显倾斜（> 5.7°）且已经完全静止时开始计时，
-            //  躺够 g_uprightDelay 秒才回正；只是轻微歪一点的话仍然立即回正。
-            //  时长由命令行参数 --upright-delay 控制，默认 3 秒。
+            //  angle 已归一化到 ±180°，所以 |angle| 就是倾角：
+            //      0° = 正立   90° = 侧躺   180° = 倒扣
+            //
+            //  · 轻微倾斜（< 50°）：欠阻尼弹簧，像不倒翁。
+            //      回正力矩 ∝ 倾角，绕过竖直位置时速度最大 → 惯性冲过头
+            //      → 反向再晃 → 收敛。ζ≈0.46，过冲约 19%，周期约 1.1 秒。
+            //
+            //  · 重心出界（>= 50°）：真花盆的重心一旦越过底面边缘就再也拉不回来，
+            //      只能继续倒下去。这里让它加速倒向侧躺（90°），然后走翻车流程。
+            //      没有这一条的话，斜到 89° 还会自己站回来，很假。
+            //      （几何上 atan(36/24)≈56°，取 50° 让"摔倒"更干脆，手感优先）
+            //
+            //  · 翻车（>= 90°）：摊着不动，攒够 --upright-delay 秒，
+            //      再用过阻尼慢慢撑起来（约 3 秒），爬的过程不左右摇。
+            //
+            //  注意：这里只改 angVel，angle 的积分和边界归一化都在上面的物理段，
+            //  这样撞到窗口/地面时旋转动量才能正确传递。
             // ------------------------------------------------------------------
-            const bool settled = fabsf(b.vx) < 1.0f
-                              && fabsf(b.vy) < 1.0f
-                              && fabsf(b.angVel) < 0.01f;
-            const bool lying = fabsf(b.angle) > 0.10f;
+            const float deg = fabsf(b.angle) * 57.2957795f;
+            const bool flipped  = deg >= 90.0f;
+            const bool unstable = deg >= 50.0f;   // 重心已出界，站不回来
 
-            if (lying && settled) {
-                p.uprightDelay += dt;
-            } else if (!lying) {
+            const bool settled = fabsf(b.vx) < 1.0f
+                              && fabsf(b.vy) < 5.0f
+                              && fabsf(b.angVel) < 0.05f;
+
+            if (flipped) {
+                if (settled) p.uprightDelay += dt;
+                if (p.uprightDelay >= g_uprightDelay) p.rising = true;
+            } else {
                 p.uprightDelay = 0.0f;
+                // 快到竖直了才认为"爬起来了"，否则爬的过程中一进入失稳区
+                // 就会被失稳逻辑重新推倒，来回拉锯
+                if (deg < 30.0f) p.rising = false;
             }
 
-            if (!lying || p.uprightDelay >= g_uprightDelay) {
-                b.angle += -b.angle * 0.15f;
-                if (fabsf(b.angle) < 0.004f) b.angle = 0.0f;
+            if (flipped && !p.rising) {
+                // 摊着不动：强阻尼按住，避免残余角速度让它慢慢滑
+                b.angVel *= expf(-14.0f * dt);
+                if (fabsf(b.angVel) < 0.02f) b.angVel = 0.0f;
+            } else if (p.rising) {
+                // 费力撑起来：过阻尼（ζ≈1.2），从 180° 倒扣转回竖直约 3 秒，
+                // 一次到位不左右摇 —— 爬起来要是晃，就成了诈尸。
+                b.angVel -= b.angle * 6.5f * dt;
+                b.angVel *= expf(-6.1f * dt);
+            } else if (unstable) {
+                // 重心出界：倒向侧躺。重力接管，比回正更有劲。
+                const float target = (b.angle > 0.0f ? 1.0f : -1.0f) * (PI_F * 0.5f);
+                b.angVel += (target - b.angle) * 18.0f * dt;
+                b.angVel *= expf(-3.5f * dt);
+            } else {
+                // 摇晃回正：欠阻尼弹簧
+                b.angVel -= b.angle * 42.0f * dt;
+                b.angVel *= expf(-6.0f * dt);
+
+                // 角度和角速度都够小才算站稳，避免长期微抖
+                if (fabsf(b.angle) < 0.006f && fabsf(b.angVel) < 0.15f) {
+                    b.angle = 0.0f;
+                    b.angVel = 0.0f;
+                }
             }
         }
     }
@@ -1933,12 +1983,15 @@ void Garden::updatePot(Pot& p, float dt)
     if (qEnvironmentVariableIsSet("TBP_TRACE")) {
         static int st = 0;
         if ((st++ % 60) == 0) {
-            tbpLog(QStringLiteral("pot: x=%1 y=%2 surf=%3 shadow=%4 vy=%5 drag=%6 hit=%7")
+            tbpLog(QStringLiteral("pot: x=%1 y=%2 surf=%3 shadow=%4 vy=%5 drag=%6 hit=%7 deg=%8 rise=%9 wait=%10")
                        .arg((int)b.x).arg((int)b.y)
                        .arg((int)p.surfaceY).arg((int)p.shadowY)
                        .arg(b.vy, 0, 'f', 0)
                        .arg(b.dragged ? 1 : 0)
-                       .arg(p.supportWidth > 0.0f ? 1 : 0));
+                       .arg(p.supportWidth > 0.0f ? 1 : 0)
+                       .arg(fabsf(b.angle) * 57.2957795f, 0, 'f', 0)
+                       .arg(p.rising ? 1 : 0)
+                       .arg(p.uprightDelay, 0, 'f', 1));
         }
     }
 
