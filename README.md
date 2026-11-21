@@ -2,6 +2,8 @@
 
 把 Windows 上的桌面电子盆栽移植到 Linux/KDE 的版本。九种像素风植物，带真实物理，能站在任意窗口的标题栏上。
 
+**[下载最新版](https://github.com/Epiphany106-blip/taskbarplant-linux/releases/latest)** · [技术实现说明](TECHNICAL.md)
+
 ![九种植物](docs/plants.png)
 
 ## 来源与致谢
