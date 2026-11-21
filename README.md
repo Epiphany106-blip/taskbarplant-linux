@@ -128,11 +128,11 @@ TBP_TRACE=1 ./build/taskbarplant
 
 ## 开发说明
 
-三个角色，各司其职：
+三方协作，各司其职：
 
-- **Ziyi** — Windows 原版 `TaskbarPlant.cpp` 的作者。像素画、物理手感、交互设计的源头都在这里。
+- **Ziyi** — Windows 原版 `TaskbarPlant.cpp` 的作者。像素画、物理手感、交互设计的源头都在这里。已授权发布本移植版。
 - **Zirui** — 提需求、定方向、做测试反馈。点击穿透、跟随窗口、残影、停在屏幕中间这些问题，都是他一个个测出来的。
-- **WorkBuddy** — AI 编程助手，负责移植实现与调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它的 `busctl`/`xprop` 排查跑通的。
+- **DeepSeek V4.1 Flash 1017**（运行在 WorkBuddy 中）— 负责移植实现与调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它用 `busctl` / `xprop` 排查跑通的。
 
 原版是纯手写 Win32 + GDI+，没有任何第三方库。移植版保留了同样的克制：只用 Qt6 做窗口和绘制，没有任何运行时依赖。
 
@@ -140,4 +140,4 @@ TBP_TRACE=1 ./build/taskbarplant
 
 MIT，见 [LICENSE](LICENSE)。
 
-原版 `TaskbarPlant.cpp` 由 Ziyi 编写，本仓库是基于它改编的 Linux 移植版本。
+这意味着你可以自由使用、修改、分发、商用，唯一要求是保留版权与许可声明。原版 `TaskbarPlant.cpp` 由 Ziyi 编写并授权，本仓库是基于它改编的 Linux 移植版本。
