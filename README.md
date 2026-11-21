@@ -6,13 +6,17 @@
 
 ## 来源与致谢
 
-本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi 编写的 Windows 原版 `TaskbarPlant.cpp`**（纯 Win32 + GDI+，无第三方库）。
+本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi Zhao 编写的 Windows 原版**：
 
-原版的绘制完全基于 4px 网格吸附的离散色块和逐行栅格化的像素椭圆，物理也全是手写的刚体模拟。移植时这些常数和公式被逐行照搬——重力 2400、弹跳系数 0.42、阻尼弹簧刚度 110、九种植物的每一块像素坐标和色值，都是原版的。
+**原版仓库 → [Ziyi-Zhao-star/TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant)**
+
+原版是纯 Win32 + GDI+，无第三方库。绘制完全基于 4px 网格吸附的离散色块和逐行栅格化的像素椭圆，物理也全是手写的刚体模拟。移植时这些常数和公式被逐行照搬——重力 2400、弹跳系数 0.42、阻尼弹簧刚度 110、九种植物的每一块像素坐标和色值，都是原版的。
 
 **我做的事情是平台移植和交互适配**：把 GDI+ 的绘制翻译成 `QPainter::fillRect`，把 Win32 的分层窗口换成 X11 的 XShape，把 `EnumWindows` 换成 KWin 脚本桥。
 
 原版在 Windows 上的设计（尤其是那些像素画的细节和手感）值得单独说一句：很好。
+
+原版同样是 DeepSeek 协助写出来的。也就是说，这个项目的上游和下游都有 AI 参与，人负责的是判断和取舍。
 
 ## 特性
 
@@ -185,7 +189,7 @@ TBP_TRACE=1 ./build/taskbarplant
 
 三方协作，各司其职：
 
-- **Ziyi** — Windows 原版 `TaskbarPlant.cpp` 的作者。像素画、物理手感、交互设计的源头都在这里。已授权发布本移植版。
+- **Ziyi Zhao** — Windows 原版 [TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant) 的作者。像素画、物理手感、交互设计的源头都在这里。已授权发布本移植版。
 - **Zirui Liu** — 提需求、定方向、做测试反馈。点击穿透、跟随窗口、残影、停在屏幕中间这些问题，都是他一个个测出来的。
 - **DeepSeek V4.1 Flash 1017**（运行在 WorkBuddy 中）— 负责移植实现与调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它用 `busctl` / `xprop` 排查跑通的。
 
@@ -195,4 +199,4 @@ TBP_TRACE=1 ./build/taskbarplant
 
 MIT，见 [LICENSE](LICENSE)。
 
-这意味着你可以自由使用、修改、分发、商用，唯一要求是保留版权与许可声明。原版 `TaskbarPlant.cpp` 由 Ziyi 编写并授权，本仓库是基于它改编的 Linux 移植版本。
+这意味着你可以自由使用、修改、分发、商用，唯一要求是保留版权与许可声明。原版 `TaskbarPlant` 由 Ziyi Zhao 编写并授权，本仓库是基于它改编的 Linux 移植版本。
