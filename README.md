@@ -6,7 +6,7 @@
 
 ## 来源与致谢
 
-本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi Zhao 编写的 Windows 原版**：
+本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi Zhao 使用 DeepSeek 编写的 Windows 原版**：
 
 **原版仓库 → [Ziyi-Zhao-star/TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant)**
 
@@ -39,71 +39,13 @@
 
 ## 技术要点
 
-### 点击穿透：`setMask` 不够
+实现细节、平台层的坑、以及从原版继承并修掉的 bug，都在 **[TECHNICAL.md](TECHNICAL.md)**。
 
-Qt 的 `QWidget::setMask()` 在 xcb 后端只设置 `ShapeBounding`（绘制裁剪），**输入区域仍是整个窗口**，全屏悬浮层会把鼠标全吃掉。
+三句话版本：
 
-必须自己调 X11 的 `XShapeCombineRectangles(dpy, win, ShapeInput, ...)`。
-
-而且输入区域是**逐色块精确**的：绘制时用一个全局 `QRegion` 收集每个 `fillRect` 经过变换矩阵映射后的矩形，得到的就是"真正有像素的地方"。所以花盆周围的空白不会挡鼠标，投影和碎屑也不计入。
-
-### 窗口承托：KWin 脚本桥
-
-Wayland 协议禁止客户端查询其它应用的窗口位置，`_NET_CLIENT_LIST` 在 Plasma 6 下基本是空的（只有 XWayland 应用）。所以只能让合成器自己报。
-
-做法：
-
-1. 程序注册 D-Bus 服务 `org.taskbarplant.Geometry`，对象 `/Geometry`，方法 `update(QString json)`
-   （**注意：`registerObject` 必须显式指定接口名**，两参数版会把 slot 注册到类名接口下，导致调用方 UnknownMethod）
-2. 程序把一个 KWin 脚本包释放到 `~/.local/share/kwin/scripts/taskbarplant-geometry/`
-3. 在 `kwinrc` 写 `Plugins/taskbarplant-geometryEnabled=true`（**键名是 `<id>Enabled`**，写成 `<id>` 无效）
-4. `org.kde.KWin /Scripting` 加载并启动脚本
-5. 脚本每 33ms 遍历 `workspace.windowList()`，把所有普通窗口的 `frameGeometry` 推过来
-
-踩过的坑都写在脚本注释里了，最坑的三个：
-
-- `w.visible` 恒为 `false`，用它过滤会把列表清空
-- `w.windowType`：`0` = 普通窗口，`1` = 桌面，`2` = 面板，`8` = 工具条（**不是位标志**）
-- `resourceClass` 是 `WM_CLASS` 的第二个字段，首字母大写，比较要转小写
-
-### 承托判定：穿越检测
-
-一帧的位移可能达到 26px（重力 2400），所以不能判"花盆最低点是否停在标题栏附近"，那会直接穿过去。
-
-正确做法是判**穿越**：窗口顶边落在 `[上一帧最低点, 这一帧最低点]` 之间，才算这一帧从上方跨到了下方。
-
-### 回正：重心失稳 + 弹簧
-
-花盆倾斜时不是简单"往竖直方向插值"，而是分三段：
-
-- **稳定区**（< 50°）：欠阻尼弹簧，`angVel -= angle * k * dt`，η≈0.46，过冲 19%，晃两下收敛
-- **失稳区**（50°~90°）：重心越过底面边缘，回正力矩变号，加速倒向侧躺
-- **躺平区**（≥ 90°）：强阻尼按住，计时结束再过硬阻尼撑起
-
-关键是第二段。只做弹簧的话，斜到 89° 还会自己立正，因为代码里"回正"是收敛的，而现实里重心出界就该倒。少这一条，整个动作都假。
-
-### 从原版继承并修掉的 bug
-
-原版 `TaskbarPlant.cpp` 里有两处在 Windows 上不明显、移植后暴露的问题：
-
-```cpp
-// 原版：重摔时补一点旋转，但没取符号
-if (impact > 1000.0f) b.angVel += 0.4f;
-```
-
-`+= 0.4f` 恒为正。往右摔时顺水推舟，往左摔时反向顶回去——**只有一边能躺平**。改成按当前转向取符号：
-
-```cpp
-b.angVel += 0.4f * (b.angVel >= 0.0f ? 1.0f : -1.0f);
-```
-
-另一处是原版的回正是纯几何插值（`angle += -angle * 0.15f`），没有重心失稳概念，也没有加速度感。这里换成了弹簧动力学。
-
-### 渲染
-
-- 悬浮层不设 `ShapeBounding`（会裁掉重绘、留下残影）
-- 每帧算脏矩形（当前帧 ∪ 上一帧），先 `CompositionMode_Source` 涂透明再画
-- 脏矩形必须包含投影：投影画在承托面上，花盆悬空时和花盆包围盒完全不重叠
+- 点击穿透要自己设 XShape 的 `ShapeInput`，`setMask` 只管绘制不管输入
+- Wayland 下拿不到其它窗口的位置，靠 KWin 脚本桥把 `frameGeometry` 推过来
+- 花盆回正是弹簧 + 重心失稳，不是单纯的插值
 
 ## 构建
 
@@ -189,11 +131,11 @@ TBP_TRACE=1 ./build/taskbarplant
 
 三方协作，各司其职：
 
-- **Ziyi Zhao** — Windows 原版 [TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant) 的作者。像素画、物理手感、交互设计的源头都在这里。已授权发布本移植版。
+- **Ziyi Zhao** — Windows 原版 [TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant) 的作者。像素画、物理手感的源头都在这里，原版同样由 DeepSeek 协助写出。已授权发布本移植版。
 - **Zirui Liu** — 提需求、定方向、做测试反馈。点击穿透、跟随窗口、残影、停在屏幕中间这些问题，都是他一个个测出来的。
 - **DeepSeek V4.1 Flash 1017**（运行在 WorkBuddy 中）— 负责移植实现与调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它用 `busctl` / `xprop` 排查跑通的。
 
-原版是纯手写 Win32 + GDI+，没有任何第三方库。移植版保留了同样的克制：只用 Qt6 做窗口和绘制，没有任何运行时依赖。
+原版是纯手写 Win32 + GDI+，没有任何第三方库。移植版保留了同样的克制：只用 Qt6 做绘制、X11 做点击穿透、KWin 脚本拿窗口位置，除此之外没有运行时依赖。
 
 ## 许可
 
