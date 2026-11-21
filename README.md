@@ -109,12 +109,28 @@ sudo apt install build-essential cmake qt6-base-dev libx11-dev libxext-dev
 TBP_TRACE=1 ./build/taskbarplant
 ```
 
+## 命令行参数
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `-u`, `--upright-delay <sec>` | `3` | 摔倒后躺多久再自己立起来（秒）。`0` 表示立刻回正 |
+| `--scale <factor>` | `1.0` | 整体缩放。`1.0` 是原版比例，放大后像素颗粒会变粗 |
+| `-h`, `--help` | — | 显示帮助 |
+| `-v`, `--version` | — | 显示版本 |
+
+```bash
+./build/taskbarplant --upright-delay 8     # 摔倒了就多躺一会儿
+./build/taskbarplant --scale 1.5           # 放大 1.5 倍
+```
+
+「摔倒」指的是倾斜超过约 6° 且完全静止。只是轻微歪一点的话仍然立刻回正，不会傻站着等。
+
 ## 环境变量
 
 | 变量 | 作用 |
 | --- | --- |
 | `TBP_TRACE=1` | 输出承托判定与花盆状态日志 |
-| `TBP_SCALE=1.5` | 整体缩放（默认 1.0，即原版比例） |
+| `TBP_SCALE=1.5` | 同 `--scale`（命令行优先） |
 | `TBP_PLATFORM=wayland` | 强制原生 Wayland 后端（会失去点击穿透和窗口承托） |
 | `TBP_POT_X` / `TBP_POT_Y` | 指定初始花盆位置，用于调试 |
 

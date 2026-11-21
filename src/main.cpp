@@ -55,6 +55,7 @@
 #include <QStandardPaths>
 #endif
 #include <QApplication>
+#include <QCommandLineParser>
 
 #include <cmath>
 #include <cstdlib>
@@ -77,6 +78,7 @@ static const float RESTITUTION   = 0.42f;
 static const float PI_F          = 3.14159265f;
 
 static float g_scale = 1.0f;                  // 运行时缩放（start() 里定）
+static float g_uprightDelay = 3.0f;           // 摔倒后躺多久再立起来（秒），--upright-delay 可改
 
 static inline float PIXf()         { return 4.0f  * g_scale; }
 static inline float POT_Wf()       { return 72.0f * g_scale; }
@@ -713,6 +715,7 @@ struct Pot {
     float     supportLeft = 0;    // 上一帧承托面左边（绝对 x）
     float     supportWidth = 0;   // 上一帧承托面宽度（用于识别"还是同一个窗口"）
     float     prevLowestAbs = -1e9f; // 上一帧最低点；spawnPot 里会初始化成实际位置
+    float     uprightDelay = 0.0f;   // 摔倒静止后已经躺了多久（秒）
     bool      everSupported = false;
 };
 
@@ -1887,10 +1890,32 @@ void Garden::updatePot(Pot& p, float dt)
         if (!b.dragged) {
             b.vx *= 0.93f;
             b.angVel *= 0.86f;
-            b.angle += -b.angle * 0.15f;
-            if (fabsf(b.angle) < 0.004f) b.angle = 0.0f;
             if (fabsf(b.vx) < 2.0f * g_scale) b.vx = 0.0f;
             if (fabsf(b.angVel) < 0.03f) b.angVel = 0.0f;
+
+            // ------------------------------------------------------------------
+            //  摔倒后先躺一会儿再立起来
+            //
+            //  原版是每帧按 15% 指数回正，半秒就直了，看不出"摔了一跤"。
+            //  这里改成：明显倾斜（> 5.7°）且已经完全静止时开始计时，
+            //  躺够 g_uprightDelay 秒才回正；只是轻微歪一点的话仍然立即回正。
+            //  时长由命令行参数 --upright-delay 控制，默认 3 秒。
+            // ------------------------------------------------------------------
+            const bool settled = fabsf(b.vx) < 1.0f
+                              && fabsf(b.vy) < 1.0f
+                              && fabsf(b.angVel) < 0.01f;
+            const bool lying = fabsf(b.angle) > 0.10f;
+
+            if (lying && settled) {
+                p.uprightDelay += dt;
+            } else if (!lying) {
+                p.uprightDelay = 0.0f;
+            }
+
+            if (!lying || p.uprightDelay >= g_uprightDelay) {
+                b.angle += -b.angle * 0.15f;
+                if (fabsf(b.angle) < 0.004f) b.angle = 0.0f;
+            }
         }
     }
 
@@ -2233,6 +2258,8 @@ private:
             "}\n");
     }
 
+    // 万一 Qt 资源没编译进去，用这份内联版兜底。逻辑必须和 src/kwin_bridge.js 一致：
+    // 不能用 w.visible 过滤（恒 false，会清空列表），要过滤小窗口和桥接窗口。
     static QString fallbackScript()
     {
         return QStringLiteral(
@@ -2244,12 +2271,20 @@ private:
             "  for (var i=0;i<l.length;++i) {\n"
             "    var w = l[i];\n"
             "    try {\n"
-            "      if (w.deleted || w.minimized || !w.visible) continue;\n"
+            "      if (w.deleted) continue;\n"
             "      if (w.windowType !== 0) continue;\n"
-            "      if (String(w.resourceClass).indexOf('taskbarplant') >= 0) continue;\n"
+            "      var rc = String(w.resourceClass).toLowerCase();\n"
+            "      if (rc.indexOf('taskbarplant') >= 0) continue;\n"
+            "      if (rc.indexOf('plasmashell') >= 0) continue;\n"
+            "      if (rc.indexOf('kwin') >= 0) continue;\n"
+            "      if (rc.indexOf('xwaylandvideobridge') >= 0) continue;\n"
             "      var g = w.frameGeometry;\n"
-            "      if (g.width <= 0 || g.height <= 0) continue;\n"
-            "      o.push([Math.round(g.x),Math.round(g.y),Math.round(g.width),Math.round(g.height)]);\n"
+            "      if (g.width < 120 || g.height < 80) continue;\n"
+            "      var mn = 0, hd = 0;\n"
+            "      try { if (w.minimized) mn = 1; } catch(e) {}\n"
+            "      try { if (w.hidden) hd = 1; } catch(e) {}\n"
+            "      o.push([Math.round(g.x),Math.round(g.y),"
+            "Math.round(g.width),Math.round(g.height),mn,hd]);\n"
             "    } catch(e) {}\n"
             "  }\n"
             "  callDBus('org.taskbarplant.Geometry','/Geometry',"
@@ -2299,7 +2334,51 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TaskbarPlant"));
     app.setApplicationDisplayName(QStringLiteral("桌面电子盆栽"));
+    app.setApplicationVersion(QStringLiteral("1.1"));
     app.setQuitOnLastWindowClosed(false);
+
+    // ---- 命令行参数 ----
+    {
+        QCommandLineParser cmd;
+        cmd.setApplicationDescription(QStringLiteral("桌面电子盆栽 —— 会摔跤、会站在窗口上的像素盆栽"));
+        cmd.addHelpOption();
+        cmd.addVersionOption();
+
+        QCommandLineOption optDelay(
+            QStringList{QStringLiteral("u"), QStringLiteral("upright-delay")},
+            QStringLiteral("摔倒后躺多久再自己立起来（秒）。设为 0 表示立刻回正。"),
+            QStringLiteral("sec"),
+            QStringLiteral("3"));
+        QCommandLineOption optScale(
+            QStringLiteral("scale"),
+            QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
+            QStringLiteral("factor"),
+            QStringLiteral("1.0"));
+        cmd.addOption(optDelay);
+        cmd.addOption(optScale);
+        cmd.process(app);
+
+        bool ok = false;
+        float d = cmd.value(optDelay).toFloat(&ok);
+        if (ok && d >= 0.0f && d <= 120.0f) {
+            g_uprightDelay = d;
+        } else {
+            fprintf(stderr, "[tbp] --upright-delay 需要 0~120 之间的秒数，已用默认值 %.0f\n",
+                    g_uprightDelay);
+            fflush(stderr);
+        }
+
+        d = cmd.value(optScale).toFloat(&ok);
+        if (ok && d > 0.3f && d < 5.0f) {
+            // Garden::start() 里会重新定 g_scale（它会读 TBP_SCALE），
+            // 所以命令行值必须写回环境变量才不会被覆盖。
+            g_scale = d;
+            qputenv("TBP_SCALE", QByteArray::number(d, 'f', 2));
+        }
+
+        fprintf(stderr, "[tbp] upright-delay=%.1fs scale=%.2f\n", g_uprightDelay, g_scale);
+        fflush(stderr);
+    }
 
     srand((unsigned)time(nullptr));
 
