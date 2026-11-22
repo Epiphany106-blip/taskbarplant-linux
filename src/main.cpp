@@ -2357,9 +2357,8 @@ void Garden::updatePot(Pot& p, float dt)
         p.waterAnim -= dt;
         if (p.waterAnim < 0.0f) p.waterAnim = 0.0f;
         p.moisture = Clampf(p.moisture + dt / 1.2f, 0.0f, 1.0f);
-        // 浇水期间的持续晃动。频率取 9.5 rad/s，接近弹簧自身的 ω=√110≈10.5，
-        // 借共振把幅度放大；原来的 0.04 只能推出 sway≈0.04（位移 2px），肉眼看不见。
-        p.swayVel += sinf((float)m_time * 9.5f) * 0.30f;
+        // 晃动只在浇下的那一下给一次冲量（见 applyMenuChoice），
+        // 之后交给弹簧自然衰减。持续正弦激励会让人觉得一直在抖。
     } else {
         p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
     }
