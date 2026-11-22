@@ -53,9 +53,13 @@ jobs:
           name: taskbarplant-linux-x86_64
           path: taskbarplant-linux-x86_64
 
-      # 打 v* tag 时自动发 Release
+      # 打 v* tag 时自动发 Release。
+      # tag 里带 -rc / -beta / -alpha 的自动标成 prerelease（预览版），
+      # 测过之后在 GitHub 页面上取消勾选 "Set as a pre-release" 就是正式版。
       - name: 发布
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: taskbarplant-linux-x86_64
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          generate_release_notes: false
