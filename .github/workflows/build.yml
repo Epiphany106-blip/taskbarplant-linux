@@ -17,29 +17,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  #  x86_64：每次提交都编。这是"能不能过"的快速信号，一分钟左右。
+  # ---------------------------------------------------------------------------
   build:
-    # main 上的普通提交只编 x86_64，用来快速验证能过；
-    # arm64 / armv7 走 QEMU，几分钟一个，只在打 tag 时才编。
-    if: ${{ github.ref_type == 'tag' || matrix.tagOnly != true }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
     strategy:
-      fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
             artifact: taskbarplant-linux-x86_64
-          - platform: linux/arm64
-            artifact: taskbarplant-linux-aarch64
-            tagOnly: true
-          - platform: linux/arm/v7
-            artifact: taskbarplant-linux-armv7
-            tagOnly: true
-
-    steps:
+    steps: &build-steps
       - uses: actions/checkout@v5
 
-      # arm64 / armv7 在 x86 runner 上要靠 QEMU 才能执行
+      # arm 架构在 x86 runner 上要靠 QEMU 才能执行
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: all
@@ -49,9 +41,8 @@ jobs:
         #    不需要 arm32v7/debian:12 那种前缀镜像（那个标签不存在）。
         # ② 不调用 file(1)，精简镜像里没装；用 objdump + uname 代替。
         # ③ chmod 也在容器里做 —— 容器内 root 建的文件，runner 用户改不动权限。
-        # ④ 不再构建 linux/386：那个容器里 Docker 的 DNS 解析不动，加了
-        #    --network host 和覆盖 resolv.conf 都没解决，投入产出不划算。
-        #    i686 用户请从源码编译。
+        # ④ 不构建 linux/386：那个容器里 Docker 的 DNS 解析不动，加 --network host
+        #    和覆盖 resolv.conf 都没解决。i686 用户请从源码编译。
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
             -v "$PWD":/src -w /src \
@@ -84,9 +75,29 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  # 打 v* tag 时才发版：三个架构全部收齐再一起挂上去
+  # ---------------------------------------------------------------------------
+  #  ARM：只在打 tag 时编。两个架构都跑在 QEMU 下，各要几分钟，
+  #  平时提交编它纯属浪费 —— 只有发版才需要这两个二进制。
+  # ---------------------------------------------------------------------------
+  build-arm:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/arm64
+            artifact: taskbarplant-linux-aarch64
+          - platform: linux/arm/v7
+            artifact: taskbarplant-linux-armv7
+    steps: *build-steps
+
+  # ---------------------------------------------------------------------------
+  #  发版：三个架构收齐再一起挂上去
+  # ---------------------------------------------------------------------------
   release:
-    needs: build
+    needs: [build, build-arm]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
