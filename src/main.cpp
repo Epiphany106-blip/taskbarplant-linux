@@ -1030,6 +1030,7 @@ struct Pot {
     float     scale = 1.0f;          // 单盆缩放（POT_SCALE_MIN ~ POT_SCALE_MAX）
     float     moisture = 1.0f;       // 泥土水分 1=湿透 0=干透
     float     waterAnim = 0.0f;      // 浇水动画剩余时间（秒）
+    float     shedTimer = 0.0f;      // 枯叶掉落的节流计时
 };
 
 static float PotMaxY(float angle, float potScale = 1.0f)
@@ -1469,6 +1470,7 @@ public:
 
     std::vector<Pot>& pots() { return m_pots; }
     std::vector<Crumb>& crumbs() { return m_crumbs; }
+    std::vector<Crumb>& wilt()   { return m_wilt; }
     PotWindow* window() const { return m_win; }
     float now() const { return m_time; }
 
@@ -1496,6 +1498,7 @@ private:
     PotWindow* m_win = nullptr;
     std::vector<Pot>  m_pots;
     std::vector<Crumb> m_crumbs;
+    std::vector<Crumb> m_wilt;      // 枯叶碎屑（缺水时从植株上掉落）
 
     int   m_activePot = -1;
     float m_time = 0.0f;
@@ -1644,6 +1647,10 @@ void PotWindow::updateInputMask()
         for (const Crumb& c : m_garden->crumbs())
             cur = cur.united(QRect((int)c.x - 10, (int)c.y - 10, 20, 20));
     }
+    if (!m_garden->wilt().empty()) {
+        for (const Crumb& c : m_garden->wilt())
+            cur = cur.united(QRect((int)c.x - 8, (int)c.y - 8, 16, 16));
+    }
 
     cur = cur.intersected(rect());
 
@@ -1700,6 +1707,15 @@ void PotWindow::paintEvent(QPaintEvent* ev)
         const QColor crumb = C(96, 66, 42);
         for (size_t i = 0; i < crumbs.size(); ++i)
             FillRectF(g, crumb, crumbs[i].x, crumbs[i].y, 3.0f * g_scale, 3.0f * g_scale);
+    }
+
+    // 枯叶碎屑
+    const std::vector<Crumb>& wilt = m_garden->wilt();
+    if (!wilt.empty()) {
+        const QColor leafA = C(176, 146, 60);
+        const QColor leafB = C(132, 100, 42);
+        for (size_t i = 0; i < wilt.size(); ++i)
+            FillRectF(g, (i & 1) ? leafA : leafB, wilt[i].x, wilt[i].y, PIX, PIX);
     }
 
     const std::vector<Pot>& pots = m_garden->pots();
@@ -2363,6 +2379,30 @@ void Garden::updatePot(Pot& p, float dt)
         p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
     }
 
+    // ---- 缺水：从植株上不断掉落枯叶碎片 ----
+    if (p.moisture < DRY_THRESHOLD && m_wilt.size() < 240) {
+        p.shedTimer -= dt;
+        if (p.shedTimer <= 0.0f) {
+            const float dry = (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD;
+            p.shedTimer = 0.55f - 0.40f * dry;              // 越干掉得越快
+
+            // 在植物本地坐标里随机取一点，再按花盆的旋转和缩放转到世界坐标
+            const float lx = (float)((rand() % 41) - 20);
+            const float ly = -10.0f
+                - (float)(rand() % (int)(PlantHeight(p.plant) * 0.75f + 1.0f));
+            const float ca = cosf(b.angle), sa = sinf(b.angle);
+
+            Crumb w;
+            w.x = b.x + (lx * ca - ly * sa) * p.scale;
+            w.y = (b.y - hh) + (lx * sa + ly * ca) * p.scale;
+            w.vx = (float)((rand() % 70) - 35);
+            w.vy = 10.0f + (float)(rand() % 40);
+            w.life = 3.0f;
+            w.floorY = m_floorY;
+            m_wilt.push_back(w);
+        }
+    }
+
     if (b.dragged) {
         b.angle += b.angVel * dt;
         b.angVel *= 0.96f;
@@ -2539,7 +2579,10 @@ void Garden::updatePot(Pot& p, float dt)
                        .arg(p.supportWidth > 0.0f ? 1 : 0)
                        .arg(fabsf(b.angle) * 57.2957795f, 0, 'f', 0)
                        .arg(p.rising ? 1 : 0)
-                       .arg(p.uprightDelay, 0, 'f', 1));
+                       .arg(p.uprightDelay, 0, 'f', 1)
+                       + QStringLiteral(" moist=%1 wilt=%2")
+                             .arg(p.moisture, 0, 'f', 2)
+                             .arg((int)m_wilt.size()));
         }
     }
 
@@ -2555,6 +2598,27 @@ void Garden::updatePhysics(float dt)
 {
     for (size_t i = 0; i < m_pots.size(); ++i)
         updatePot(m_pots[i], dt);
+
+    // 枯叶碎屑：比重力加速度小得多，还会左右飘，落地就贴住
+    for (size_t i = 0; i < m_wilt.size();) {
+        Crumb& w = m_wilt[i];
+        w.vy += 420.0f * g_scale * dt;
+        w.vx += sinf(m_time * 2.4f + w.y * 0.03f) * 24.0f * g_scale * dt;
+        w.x += w.vx * dt;
+        w.y += w.vy * dt;
+        if (w.y > w.floorY - 3.0f) {
+            w.y = w.floorY - 3.0f;
+            w.vx = 0.0f;
+            w.vy = 0.0f;
+        }
+        w.life -= dt;
+        if (w.life <= 0.0f) {
+            m_wilt[i] = m_wilt.back();
+            m_wilt.pop_back();
+        } else {
+            ++i;
+        }
+    }
 
     for (size_t i = 0; i < m_crumbs.size();) {
         Crumb& c = m_crumbs[i];
