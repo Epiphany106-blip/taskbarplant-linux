@@ -92,6 +92,7 @@ static float g_baseScale = 1.0f;              // 屏幕基准缩放（start() �
 static float g_uprightDelay = 3.0f;           // 摔倒后躺多久再立起来（秒），--upright-delay 可改
 static float g_drySeconds = 1800.0f;          // 泥土从湿透到干透的秒数，默认 30 分钟
 static float g_wiltAmount = 0.0f;             // 当前绘制用的枯萎程度 0..1（绘制期临时值）
+static bool  g_wiltEnabled = true;            // false = 关闭枯萎，叶子永远绿
 
 // 单盆缩放
 static const float POT_SCALE_MIN  = 0.65f;
@@ -1740,7 +1741,7 @@ void PotWindow::paintEvent(QPaintEvent* ev)
         const float savedWilt  = g_wiltAmount;
 
         g_scale = g_baseScale * p.scale;
-        g_wiltAmount = (p.moisture < DRY_THRESHOLD)
+        g_wiltAmount = (g_wiltEnabled && p.moisture < DRY_THRESHOLD)
                        ? (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD
                        : 0.0f;
 
@@ -2375,12 +2376,14 @@ void Garden::updatePot(Pot& p, float dt)
         p.moisture = Clampf(p.moisture + dt / 1.2f, 0.0f, 1.0f);
         // 晃动只在浇下的那一下给一次冲量（见 applyMenuChoice），
         // 之后交给弹簧自然衰减。持续正弦激励会让人觉得一直在抖。
-    } else {
+    } else if (g_wiltEnabled) {
         p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
+    } else {
+        p.moisture = 1.0f;          // 关掉枯萎就当作永远浇透了
     }
 
     // ---- 缺水：从植株上不断掉落枯叶碎片 ----
-    if (p.moisture < DRY_THRESHOLD && m_wilt.size() < 240) {
+    if (g_wiltEnabled && p.moisture < DRY_THRESHOLD && m_wilt.size() < 240) {
         p.shedTimer -= dt;
         if (p.shedTimer <= 0.0f) {
             const float dry = (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD;
@@ -3019,6 +3022,11 @@ int main(int argc, char** argv)
             QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
             QStringLiteral("factor"),
             QStringLiteral("1.0"));
+        QCommandLineOption optNoWilt(
+            QStringLiteral("no-wilt"),
+            QStringLiteral("关闭枯萎：叶子永远保持绿色，不掉枯叶、不需要浇水。"),
+            QString(),
+            QString());
         QCommandLineOption optDry(
             QStringLiteral("dry-seconds"),
             QStringLiteral("泥土从湿透到干透的秒数，默认 1800（30 分钟）。调小可以快速看到枯萎。"),
@@ -3037,6 +3045,7 @@ int main(int argc, char** argv)
             QStringLiteral("path"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
+        cmd.addOption(optNoWilt);
         cmd.addOption(optDry);
         cmd.addOption(optExport);
         cmd.addOption(optProbe);
@@ -3071,6 +3080,8 @@ int main(int argc, char** argv)
 
         bool ok = false;
 
+        g_wiltEnabled = !cmd.isSet(optNoWilt);
+
         float dry = cmd.value(optDry).toFloat(&ok);
         if (ok && dry >= 5.0f && dry <= 86400.0f) {
             g_drySeconds = dry;
@@ -3096,8 +3107,9 @@ int main(int argc, char** argv)
             qputenv("TBP_SCALE", QByteArray::number(d, 'f', 2));
         }
 
-        fprintf(stderr, "[tbp] upright-delay=%.1fs scale=%.2f dry=%.0fs\n",
-                g_uprightDelay, g_scale, g_drySeconds);
+        fprintf(stderr, "[tbp] upright-delay=%.1fs scale=%.2f dry=%.0fs wilt=%s\n",
+                g_uprightDelay, g_scale, g_drySeconds,
+                g_wiltEnabled ? "on" : "off");
         fflush(stderr);
     }
 
