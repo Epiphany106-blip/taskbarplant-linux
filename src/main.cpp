@@ -1936,7 +1936,9 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
     int chosen = -2;
     populateMenu(menu, pot, &chosen);
     menu.exec(e->globalPos());
+    tbpLog(QStringLiteral("menu: closed chosen=%1").arg(chosen));
     if (chosen != -2) m_garden->applyMenuChoice(chosen, mx, my);
+    tbpLog(QStringLiteral("menu: handler done"));
     e->accept();
 }
 
@@ -1949,7 +1951,7 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
 //   2. 不能用系统原生对话框。KDE 下 Qt 会转给 xdg-desktop-portal，
 //      portal 不可用时进程直接退出，终端里连错误都没有。
 // -----------------------------------------------------------------------------
-static void exportPotInteractive(Pot& pot)
+static void exportPotInteractive(Pot& pot, QWidget* parent)
 {
     const QString name = QString::fromUtf8(kPlantNames[pot.plant])
                        + QStringLiteral(".png");
@@ -1958,7 +1960,7 @@ static void exportPotInteractive(Pot& pot)
 
     // 用实例而不是静态函数，才能强制置顶。PotWindow 是 WindowStaysOnTop 的
     // 全屏窗口，普通对话框会被它压在下面 —— 表现就是"点了导出没反应"。
-    QFileDialog dlg(nullptr, QStringLiteral("导出植物图片"),
+    QFileDialog dlg(parent, QStringLiteral("导出植物图片"),
                     QDir::homePath() + QStringLiteral("/") + name,
                     QStringLiteral("PNG 图片 (*.png)"));
     dlg.setOption(QFileDialog::DontUseNativeDialog, true);
@@ -1966,7 +1968,7 @@ static void exportPotInteractive(Pot& pot)
     dlg.setFileMode(QFileDialog::AnyFile);
     dlg.setDefaultSuffix(QStringLiteral("png"));
     dlg.setWindowFlag(Qt::WindowStaysOnTopHint, true);
-    dlg.setWindowModality(Qt::ApplicationModal);
+    dlg.setWindowModality(Qt::WindowModal);
 
     if (dlg.exec() != QDialog::Accepted) {
         tbpLog(QStringLiteral("export: cancelled"));
@@ -1983,6 +1985,7 @@ static void exportPotInteractive(Pot& pot)
     tbpLog(QStringLiteral("export: save %1 -> %2").arg(ok ? QStringLiteral("ok")
                                                           : QStringLiteral("FAILED"),
                                                        path));
+    tbpLog(QStringLiteral("export: done, returning to event loop"));
 }
 
 // -----------------------------------------------------------------------------
@@ -2309,7 +2312,14 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
             m_win->requestFullRepaint();
         }
     } else if (idx == MENU_CMD_EXPORT) {
-        if (p) exportPotInteractive(*p);
+        // 推迟到事件循环的下一轮再开对话框。
+        // 此刻 QMenu::exec 可能刚刚返回，菜单的鼠标/键盘 grab 还没完全释放，
+        // 立刻再进一个模态循环容易把整个事件循环搞死。
+        const int potIdx = m_activePot;
+        QTimer::singleShot(0, m_win, [this, potIdx]() {
+            if (potIdx >= 0 && potIdx < (int)m_pots.size())
+                exportPotInteractive(m_pots[potIdx], m_win);
+        });
     } else if (idx == MENU_CMD_SPAWN) {
         spawnPot(mx, my, p ? p->plant : PLANT_SUNFLOWER);
     } else if (idx == MENU_CMD_REMOVE) {
@@ -3047,7 +3057,16 @@ int main(int argc, char** argv)
     QObject::connect(&timer, &QTimer::timeout, [&garden]() { garden.tick(); });
     timer.start(ANIM_INTERVAL);
 
-    return app.exec();
+    // 诊断：lastWindowClosed 若在这里触发，说明 Qt 认为没有"主窗口"了。
+    // PotWindow 是 Qt::Tool，按 Qt 的定义不算 primary window。
+    QObject::connect(&app, &QGuiApplication::lastWindowClosed, []() {
+        tbpLog(QStringLiteral("!!! lastWindowClosed fired"));
+    });
+    app.setQuitOnLastWindowClosed(false);
+
+    const int rc = app.exec();
+    tbpLog(QStringLiteral("event loop exited rc=%1").arg(rc));
+    return rc;
 }
 
 #include "main.moc"
