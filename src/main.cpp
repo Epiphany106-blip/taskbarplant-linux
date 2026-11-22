@@ -26,7 +26,13 @@
 #include <QWidget>
 #include <QPainter>
 #include <QTimer>
+#include <QGridLayout>
+#include <QVBoxLayout>
+#include <QToolButton>
+#include <QWidgetAction>
+#include <QFrame>
 #include <QMenu>
+#include <QFileDialog>
 #include <QAction>
 #include <QScreen>
 #include <QCursor>
@@ -81,8 +87,20 @@ static const float GRAVITY       = 2400.0f;
 static const float RESTITUTION   = 0.42f;
 static const float PI_F          = 3.14159265f;
 
-static float g_scale = 1.0f;                  // 运行时缩放（start() 里定）
+static float g_scale = 1.0f;                  // 当前绘制用的缩放（= g_baseScale * 该盆 scale）
+static float g_baseScale = 1.0f;              // 屏幕基准缩放（start() 里定，不含单盆缩放）
 static float g_uprightDelay = 3.0f;           // 摔倒后躺多久再立起来（秒），--upright-delay 可改
+static float g_drySeconds = 1800.0f;          // 泥土从湿透到干透的秒数，默认 30 分钟
+static float g_wiltAmount = 0.0f;             // 当前绘制用的枯萎程度 0..1（绘制期临时值）
+
+// 单盆缩放
+static const float POT_SCALE_MIN  = 0.65f;
+static const float POT_SCALE_MAX  = 1.45f;
+static const float POT_SCALE_STEP = 0.10f;
+
+// 浇水
+static const float WATER_DURATION = 2.2f;     // 浇水动画时长（秒）
+static const float DRY_THRESHOLD  = 0.40f;    // 水分低于它开始发蔫
 
 static inline float PIXf()         { return 4.0f  * g_scale; }
 static inline float POT_Wf()       { return 72.0f * g_scale; }
@@ -114,9 +132,13 @@ enum PlantType {
 };
 
 enum MenuCmd {
-    MENU_CMD_SPAWN = PLANT_COUNT,
-    MENU_CMD_REMOVE,
-    MENU_CMD_QUIT,
+    MENU_CMD_WATER = PLANT_COUNT,   // 浇水
+    MENU_CMD_SCALE_UP,              // 花盆调大
+    MENU_CMD_SCALE_DOWN,            // 花盆调小
+    MENU_CMD_SPAWN,                 // 放置新花盆
+    MENU_CMD_REMOVE,                // 移除这个花盆
+    MENU_CMD_EXPORT,                // 导出植物图片
+    MENU_CMD_QUIT,                  // 退出程序
     MENU_ITEM_COUNT
 };
 
@@ -161,8 +183,20 @@ static void FillRectF(QPainter& g, const QColor& col, float x, float y, float w,
         // transform() 含 translate / rotate，映射出来的就是屏幕像素位置
         *g_capRegion += g.transform().mapRect(rf).toAlignedRect();
     }
-    if (!g_capOnly)
-        g.fillRect(rf, col);
+    if (!g_capOnly) {
+        // 枯萎：把绿色系的色块往枯黄方向插值。只动绿，花和花盆不受影响，
+        // 这样十几种植物的绘制函数一行都不用改。
+        QColor c = col;
+        if (g_wiltAmount > 0.001f
+            && col.green() > col.red() && col.green() > col.blue()) {
+            const QColor dry(158, 124, 66);
+            c = QColor((int)(col.red()   + (dry.red()   - col.red())   * g_wiltAmount),
+                       (int)(col.green() + (dry.green() - col.green()) * g_wiltAmount),
+                       (int)(col.blue()  + (dry.blue()  - col.blue())  * g_wiltAmount),
+                       col.alpha());
+        }
+        g.fillRect(rf, c);
+    }
 }
 
 // 像素椭圆：按 4px 行逐行栅格化，每行宽度取整到像素格，边缘天然是阶梯
@@ -926,6 +960,11 @@ static bool DumpPlants(const QString& path)
     f.setPixelSize(17);
     g.setFont(f);
 
+    // TBP_WILT=0..1 强制指定枯萎程度，用来验证枯叶配色（不给就用健康的绿）
+    bool wok = false;
+    const float forcedWilt = qgetenv("TBP_WILT").toFloat(&wok);
+    g_wiltAmount = wok ? Clampf(forcedWilt, 0.0f, 1.0f) : 0.0f;
+
     for (int i = 0; i < PLANT_COUNT; ++i) {
         const int col = i % cols;
         const int row = i / cols;
@@ -952,6 +991,7 @@ static bool DumpPlants(const QString& path)
                    offX + (col + 1) * cellW - 18, row * cellH + cellH - 6);
     }
 
+    g_wiltAmount = 0.0f;
     g.end();
     return img.save(path);
 }
@@ -987,12 +1027,15 @@ struct Pot {
     float     uprightDelay = 0.0f;   // 摔倒静止后已经躺了多久（秒）
     bool      rising = false;        // 正在从翻车状态爬起来（期间不应用失稳逻辑）
     bool      everSupported = false;
+    float     scale = 1.0f;          // 单盆缩放（POT_SCALE_MIN ~ POT_SCALE_MAX）
+    float     moisture = 1.0f;       // 泥土水分 1=湿透 0=干透
+    float     waterAnim = 0.0f;      // 浇水动画剩余时间（秒）
 };
 
-static float PotMaxY(float angle)
+static float PotMaxY(float angle, float potScale = 1.0f)
 {
-    const float hw = POT_W * 0.5f;
-    const float hh = POT_H * 0.5f;
+    const float hw = POT_W * 0.5f * potScale;
+    const float hh = POT_H * 0.5f * potScale;
     const float c = cosf(angle);
     const float s = sinf(angle);
     float maxY = -1e9f;
@@ -1004,6 +1047,45 @@ static float PotMaxY(float angle)
     }
     return maxY;
 }
+
+// -----------------------------------------------------------------------------
+//  导出一株植物为 PNG（透明底）
+//
+//  和 DumpPlants 的区别：这里只画一个花盆，尺寸按该盆的缩放和植物高度自适应，
+//  输出的图可以直接贴到别处。
+// -----------------------------------------------------------------------------
+static bool ExportPotPng(const Pot& p, const QString& path)
+{
+    const float h    = PlantHeight(p.plant) * p.scale * g_baseScale;
+    const float ph   = POT_Hf() * p.scale;
+    const int   pad  = 24;
+    const int   w    = (int)(POT_Wf() * p.scale * 2.6f) + pad * 2;
+    const int   ht   = (int)(h + ph) + pad * 2 + 8;
+
+    QImage img(w, ht, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+
+    QPainter g(&img);
+    g.setRenderHint(QPainter::Antialiasing, false);
+
+    const float savedScale = g_scale;
+    const float savedWilt  = g_wiltAmount;
+
+    g_scale = g_baseScale * p.scale;
+    g_wiltAmount = (p.moisture < DRY_THRESHOLD)
+                   ? (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD : 0.0f;
+
+    g.translate(w * 0.5f, ht - pad - ph * 0.5f);
+    DrawPlantLocal(g, -ph * 0.5f + 3.0f, p.plant, 0.0f, false, 0.0f);
+    DrawPotLocal(g);
+
+    g_scale = savedScale;
+    g_wiltAmount = savedWilt;
+    g.end();
+
+    return img.save(path);
+}
+
 
 
 // =============================================================================
@@ -1332,6 +1414,14 @@ public:
 
     void fadeOutAndClose();
 
+    // 缩放变了要整屏重画：旧尺寸留下的像素不在新脏矩形里
+    void requestFullRepaint() { m_lastDirty = QRect(); update(); }
+
+    // 构建菜单但不弹出，返回它的建议尺寸。--probe-menu 用来在无头环境下
+    // 验证双列布局没算错，不需要真的右键。
+    QSize probeMenuSize();
+    void  populateMenu(QMenu& menu, int pot, int* chosenOut);
+
     // 每帧根据花盆包围盒重设窗口区域：
     //   · setMask()            -> 裁剪"绘制"范围（X11 的 ShapeBounding）
     //   · applyInputShape()    -> 裁剪"鼠标接收"范围（X11 的 ShapeInput）
@@ -1379,6 +1469,7 @@ public:
 
     std::vector<Pot>& pots() { return m_pots; }
     std::vector<Crumb>& crumbs() { return m_crumbs; }
+    PotWindow* window() const { return m_win; }
     float now() const { return m_time; }
 
     void spawnPot(float x, float y, PlantType plant);
@@ -1503,11 +1594,14 @@ void PotWindow::updateInputMask()
     for (size_t i = 0; i < pots.size(); ++i) {
         const Pot& p = pots[i];
         const Body& b = p.body;
+        const float phh1 = POT_H * 0.5f * p.scale;
         pg.save();
-        pg.translate(b.x, b.y - hh);
+        pg.translate(b.x, b.y - phh1);
         pg.rotate(b.angle * 57.2957795f);
-        DrawPlantLocal(pg, -hh + 3.0f, p.plant, p.sway, p.poking, m_garden->now());
+        g_scale = g_baseScale * p.scale;
+        DrawPlantLocal(pg, -phh1 + 3.0f, p.plant, p.sway, p.poking, m_garden->now());
         DrawPotLocal(pg);
+        g_scale = g_baseScale;
         pg.restore();
     }
     g_capRegion = nullptr;
@@ -1615,13 +1709,26 @@ void PotWindow::paintEvent(QPaintEvent* ev)
         int   sa = (int)(100.0f - lift * 70.0f);
         FillPixelEllipse(g, C(0, 0, 0, sa), b.x, p.shadowY - 6.0f, sw * 0.5f, 4.0f);
 
-        // 花盆 + 植物共用同一个变换
+        // 花盆 + 植物共用同一个变换。单盆缩放通过临时改 g_scale 实现，
+        // 这样 DrawPotLocal / DrawPlantLocal 都不必改签名 —— 它们内部全是 PIX 的倍数。
+        const float phh = POT_H * 0.5f * p.scale;
+        const float savedScale = g_scale;
+        const float savedWilt  = g_wiltAmount;
+
+        g_scale = g_baseScale * p.scale;
+        g_wiltAmount = (p.moisture < DRY_THRESHOLD)
+                       ? (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD
+                       : 0.0f;
+
         g.save();
-        g.translate(b.x, b.y - hh);
+        g.translate(b.x, b.y - phh);
         g.rotate(b.angle * 57.2957795f);
-        DrawPlantLocal(g, -hh + 3.0f, p.plant, p.sway, p.poking, m_garden->now());
+        DrawPlantLocal(g, -phh + 3.0f, p.plant, p.sway, p.poking, m_garden->now());
         DrawPotLocal(g);
         g.restore();
+
+        g_scale = savedScale;
+        g_wiltAmount = savedWilt;
     }
 }
 
@@ -1670,6 +1777,146 @@ void PotWindow::mouseReleaseEvent(QMouseEvent* e)
     e->accept();
 }
 
+// 菜单内容（植物两列 + 命令单列）。chosenOut 在用户点选后写入编号，
+// 不点选则保持 -2。抽成独立函数是为了 --probe-menu 能在无头环境下量尺寸。
+void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
+{
+    const int kCols = 2;
+    const int kCellW = 112, kCellH = 30, kPad = 8;
+    const int kPanelW = kCellW * kCols + kPad * 2;
+
+    static const QColor kDots[PLANT_COUNT] = {
+        C(78, 154, 78), C(247, 197, 49), C(150, 60, 70),
+        C(226, 78, 106), C(212, 62, 62), C(46, 116, 66),
+        C(126, 180, 134), C(150, 194, 96), C(206, 52, 78),
+        C(152, 106, 202), C(96, 176, 76), C(212, 58, 46),
+        C(240, 240, 226)
+    };
+    auto dotIcon = [](const QColor& col) {
+        QPixmap pm(10, 10);
+        pm.fill(Qt::transparent);
+        QPainter pp(&pm);
+        pp.fillRect(QRect(0, 0, 10, 10), col);
+        pp.end();
+        return QIcon(pm);
+    };
+
+    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint
+                        | Qt::NoDropShadowWindowHint);
+    menu.setAttribute(Qt::WA_TranslucentBackground, true);
+    menu.setStyleSheet("QMenu { background: transparent; border: none; padding: 0px; }");
+
+    QWidget* panel = new QWidget;
+    panel->setObjectName("menuPanel");
+    panel->setFixedWidth(kPanelW);
+    panel->setStyleSheet(QString(
+        "#menuPanel {"
+        "  background-color: rgb(38,26,18);"
+        "  border: 2px solid rgb(198,120,68);"
+        "}"
+        "QToolButton {"
+        "  background: transparent;"
+        "  color: rgb(216,188,152);"
+        "  border: none;"
+        "  text-align: left;"
+        "  padding-left: 5px;"
+        "  font-size: 13px;"
+        "}"
+        "QToolButton:hover {"
+        "  background-color: rgb(122,74,42);"
+        "  color: rgb(255,240,210);"
+        "}"
+        "QToolButton:disabled { color: rgb(105,88,72); }"
+        "QFrame { color: rgb(120,74,42); }"
+    ));
+
+    QVBoxLayout* v = new QVBoxLayout(panel);
+    v->setContentsMargins(kPad, kPad, kPad, kPad);
+    v->setSpacing(0);
+
+    QFont mf = panel->font();
+    mf.setPixelSize(13);
+    mf.setFamily(QStringLiteral("Noto Sans CJK SC"));
+    panel->setFont(mf);
+
+    auto mkBtn = [&](const QString& text, const QColor& dot) {
+        QToolButton* b = new QToolButton(panel);
+        b->setText(QStringLiteral(" ") + text);
+        b->setIcon(dotIcon(dot));
+        b->setIconSize(QSize(10, 10));
+        b->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        b->setAutoRaise(true);
+        b->setFixedHeight(kCellH);
+        b->setFont(mf);
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        b->setCursor(Qt::PointingHandCursor);
+        return b;
+    };
+
+    auto bind = [&](QToolButton* b, int id) {
+        connect(b, &QToolButton::clicked, [&menu, chosenOut, id]() {
+            *chosenOut = id;
+            menu.close();
+        });
+    };
+
+    QWidget* plantBox = new QWidget(panel);
+    QGridLayout* grid = new QGridLayout(plantBox);
+    grid->setContentsMargins(0, 0, 0, 0);
+    grid->setSpacing(0);
+    for (int i = 0; i < PLANT_COUNT; ++i) {
+        QToolButton* b = mkBtn(QString::fromUtf8(kPlantNames[i]), kDots[i]);
+        bind(b, i);
+        grid->addWidget(b, i / kCols, i % kCols);
+    }
+    v->addWidget(plantBox);
+
+    QFrame* line = new QFrame(panel);
+    line->setFrameShape(QFrame::HLine);
+    line->setFixedHeight(9);
+    v->addWidget(line);
+
+    struct Cmd { int id; const char* text; };
+    const Cmd cmds[] = {
+        { MENU_CMD_WATER,      "浇水" },
+        { MENU_CMD_SCALE_UP,   "花盆调大" },
+        { MENU_CMD_SCALE_DOWN, "花盆调小" },
+        { MENU_CMD_SPAWN,      "放置新花盆" },
+        { MENU_CMD_REMOVE,     "移除这个花盆" },
+        { MENU_CMD_EXPORT,     "导出植物图片" },
+        { MENU_CMD_QUIT,       "退出程序" },
+    };
+    const QColor grey = C(150, 150, 150);
+    for (const Cmd& c : cmds) {
+        QToolButton* b = mkBtn(QString::fromUtf8(c.text), grey);
+        bind(b, c.id);
+
+        const bool needsPot = (c.id == MENU_CMD_WATER
+                            || c.id == MENU_CMD_SCALE_UP
+                            || c.id == MENU_CMD_SCALE_DOWN
+                            || c.id == MENU_CMD_EXPORT);
+        if (needsPot && pot < 0) b->setEnabled(false);
+        if (c.id == MENU_CMD_REMOVE)
+            b->setEnabled(pot >= 0 && m_garden->pots().size() > 1);
+
+        v->addWidget(b);
+    }
+
+    QWidgetAction* wa = new QWidgetAction(&menu);
+    wa->setDefaultWidget(panel);
+    menu.addAction(wa);
+}
+
+QSize PotWindow::probeMenuSize()
+{
+    QMenu menu(this);
+    int chosen = -2;
+    populateMenu(menu, 0, &chosen);
+    QSize sz = menu.sizeHint();
+    if (sz.isEmpty()) sz = menu.geometry().size();
+    return sz;
+}
+
 void PotWindow::contextMenuEvent(QContextMenuEvent* e)
 {
     QPointF pos = e->pos();
@@ -1685,73 +1932,11 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
     }
     m_garden->setActivePot(pot);
 
-    // ---- 像素风自绘菜单（与原版配色/行高完全一致）----
     QMenu menu(this);
-    menu.setWindowFlags(menu.windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
-    menu.setAttribute(Qt::WA_TranslucentBackground, true);
-
-    const int kMenuW = 178, kMenuRowH = 34, kMenuPad = 8;
-    const int rows = MENU_ITEM_COUNT;
-    const int mh = kMenuRowH * rows + kMenuPad * 2;
-
-    menu.setStyleSheet(QString(
-        "QMenu {"
-        "  background-color: rgb(38,26,18);"
-        "  border: 2px solid rgb(198,120,68);"
-        "  padding: %1px;"
-        "  color: rgb(216,188,152);"
-        "  font-family: 'Microsoft YaHei','Noto Sans CJK SC','WenQuanYi Micro Hei',sans-serif;"
-        "  font-size: 13px;"
-        "}"
-        "QMenu::item {"
-        "  height: %2px;"
-        "  padding-left: 32px;"
-        "  padding-right: 10px;"
-        "  background: transparent;"
-        "}"
-        "QMenu::item:selected {"
-        "  background-color: rgb(122,74,42);"
-        "  color: rgb(255,240,210);"
-        "}"
-        "QMenu::separator { height: 0px; margin: 0px; }"
-    ).arg(kMenuPad).arg(kMenuRowH - 2));
-
-    // 左侧小色块：QMenu 不支持自定义图标块，用带色方块图标模拟
-    static const QColor kDots[PLANT_COUNT] = {
-        C(78, 154, 78), C(247, 197, 49), C(150, 60, 70),
-        C(226, 78, 106), C(212, 62, 62), C(46, 116, 66),
-        C(126, 180, 134), C(150, 194, 96), C(206, 52, 78),
-        C(152, 106, 202), C(96, 176, 76), C(212, 58, 46),
-        C(240, 240, 226)
-    };
-    auto dotIcon = [](const QColor& col) {
-        QPixmap pm(12, 12);
-        pm.fill(Qt::transparent);
-        QPainter pp(&pm);
-        pp.fillRect(QRect(0, 0, 12, 12), col);
-        pp.end();
-        return QIcon(pm);
-    };
-
-    for (int i = 0; i < PLANT_COUNT; ++i) {
-        QAction* a = menu.addAction(dotIcon(kDots[i]), QString::fromUtf8(kPlantNames[i]));
-        a->setData(i);
-    }
-    menu.addSeparator();
-    {
-        const QColor grey = C(150, 150, 150);
-        QAction* a = menu.addAction(dotIcon(grey), QStringLiteral("放置新花盆"));
-        a->setData((int)MENU_CMD_SPAWN);
-        a = menu.addAction(dotIcon(grey), QStringLiteral("移除这个花盆"));
-        a->setData((int)MENU_CMD_REMOVE);
-        // 只剩一个花盆时不允许移除：否则输入区域变空，右键菜单再也点不出来
-        a->setEnabled(pot >= 0 && m_garden->pots().size() > 1);
-        a = menu.addAction(dotIcon(grey), QStringLiteral("退出程序"));
-        a->setData((int)MENU_CMD_QUIT);
-    }
-
-    QAction* chosen = menu.exec(e->globalPos());
-    if (chosen) m_garden->applyMenuChoice(chosen->data().toInt(), mx, my);
+    int chosen = -2;
+    populateMenu(menu, pot, &chosen);
+    menu.exec(e->globalPos());
+    if (chosen != -2) m_garden->applyMenuChoice(chosen, mx, my);
     e->accept();
 }
 
@@ -1882,10 +2067,11 @@ void Garden::start()
     if (qEnvironmentVariableIsSet("TBP_SCALE")) {
         bool ok = false;
         float v = qgetenv("TBP_SCALE").toFloat(&ok);
-        if (ok && v > 0.3f && v < 5.0f) g_scale = v;
+        if (ok && v > 0.3f && v < 5.0f) g_baseScale = v;
     } else {
-        g_scale = 1.0f;
+        g_baseScale = 1.0f;
     }
+    g_scale = g_baseScale;
 
     // 以整块屏幕为基准，按探到的面板向内收。
     // 只有在完全探不到面板时才退回 availableGeometry（有些 WM 会正确报告）。
@@ -1965,9 +2151,11 @@ void Garden::spawnPot(float x, float y, PlantType plant)
 
 int Garden::pickPot(float mx, float my, bool wantPlant, int* hitIdx)
 {
-    const float hh = POT_H * 0.5f;
     for (int i = (int)m_pots.size() - 1; i >= 0; --i) {
         const Pot& p = m_pots[i];
+        // 每盆缩放不同，尺寸必须按 p.scale 算，否则缩放后点不准
+        const float sc = g_scale * p.scale;
+        const float hh = POT_H * 0.5f * p.scale;
         float cx = p.body.x;
         float cy = p.body.y - hh;
         float dx = mx - cx;
@@ -1979,10 +2167,10 @@ int Garden::pickPot(float mx, float my, bool wantPlant, int* hitIdx)
 
         bool hit;
         if (wantPlant)
-            hit = fabsf(lx) <= 42.0f * g_scale
-               && ly >= -hh - PlantHeight(p.plant) && ly <= -hh;
+            hit = fabsf(lx) <= 42.0f * sc
+               && ly >= -hh - PlantHeight(p.plant) * sc && ly <= -hh;
         else
-            hit = fabsf(lx) <= POT_W * 0.5f + 6.0f * g_scale
+            hit = fabsf(lx) <= POT_W * 0.5f * p.scale + 6.0f * sc
                && ly >= -hh - 10.0f && ly <= hh + 4.0f;
 
         if (hit) { if (hitIdx) *hitIdx = i; return i; }
@@ -2015,7 +2203,8 @@ void Garden::dragTo(float mx, float my)
     if (!p.body.dragged && !p.poking) return;
 
     if (p.body.dragged) {
-        float tx = Clampf(mx - p.dragOffX, POT_W * 0.5f, (float)m_winW - POT_W * 0.5f);
+        const float pw = POT_W * 0.5f * p.scale;
+        float tx = Clampf(mx - p.dragOffX, pw, (float)m_winW - pw);
         float ty = Clampf(my - p.dragOffY, POT_H, m_floorY);
 
         // 用相邻两帧位移估算甩出速度（限幅，避免快速拖动变成"发射炮弹"）
@@ -2062,6 +2251,32 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
         p->sway = 0.0f;
         p->swayVel = 3.0f;          // 换植物时晃一下
         p->body.vy = -90.0f * g_scale;        // 轻轻一跳
+    } else if (idx == MENU_CMD_WATER) {
+        if (p) p->waterAnim = WATER_DURATION;
+    } else if (idx == MENU_CMD_SCALE_UP || idx == MENU_CMD_SCALE_DOWN) {
+        if (p) {
+            float ns = p->scale + ((idx == MENU_CMD_SCALE_UP) ? POT_SCALE_STEP : -POT_SCALE_STEP);
+            p->scale = Clampf(ns, POT_SCALE_MIN, POT_SCALE_MAX);
+            p->body.vy = -90.0f * g_baseScale;   // 变大小后跳一下
+            // 尺寸变了，上一帧的穿越检测基准跟着变，否则会误判"刚跨过顶边"
+            p->prevLowestAbs = p->body.y - POT_Hf() * 0.5f * p->scale
+                             + PotMaxY(p->body.angle, p->scale);
+            m_win->requestFullRepaint();
+        }
+    } else if (idx == MENU_CMD_EXPORT) {
+        if (p) {
+            const QString name = QString::fromUtf8(kPlantNames[p->plant])
+                               + QStringLiteral(".png");
+            QString path = QFileDialog::getSaveFileName(
+                m_win, QStringLiteral("导出植物图片"),
+                QDir::homePath() + QStringLiteral("/") + name,
+                QStringLiteral("PNG 图片 (*.png)"));
+            if (!path.isEmpty()) {
+                if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+                    path += QStringLiteral(".png");
+                ExportPotPng(*p, path);
+            }
+        }
     } else if (idx == MENU_CMD_SPAWN) {
         spawnPot(mx, my, p ? p->plant : PLANT_SUNFLOWER);
     } else if (idx == MENU_CMD_REMOVE) {
@@ -2083,8 +2298,18 @@ void Garden::quitWithFade()
 void Garden::updatePot(Pot& p, float dt)
 {
     Body& b = p.body;
-    const float hw = POT_W * 0.5f;
-    const float hh = POT_H * 0.5f;
+    const float hw = POT_W * 0.5f * p.scale;
+    const float hh = POT_H * 0.5f * p.scale;
+
+    // ---- 水分：平时慢慢蒸发，浇水后快速吸饱 ----
+    if (p.waterAnim > 0.0f) {
+        p.waterAnim -= dt;
+        if (p.waterAnim < 0.0f) p.waterAnim = 0.0f;
+        p.moisture = Clampf(p.moisture + dt / 1.2f, 0.0f, 1.0f);
+        p.swayVel += sinf((float)m_time * 20.0f) * 0.04f;   // 被水浇得直晃
+    } else {
+        p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
+    }
 
     if (b.dragged) {
         b.angle += b.angVel * dt;
@@ -2110,7 +2335,7 @@ void Garden::updatePot(Pot& p, float dt)
     }
 
     // ---------- 承托面 ----------
-    float maxY = PotMaxY(b.angle);
+    float maxY = PotMaxY(b.angle, p.scale);
     float lowest = b.y - hh + maxY;
     float surface = m_floorY;
     float shadowSurface = m_floorY;
@@ -2140,7 +2365,7 @@ void Garden::updatePot(Pot& p, float dt)
         shadowSurface = hit.shadowTop - (float)m_winY;
     }
     // 记录本帧最低点，下一帧用它做穿越检测
-    p.prevLowestAbs = (float)m_winY + (b.y - hh + PotMaxY(b.angle));
+    p.prevLowestAbs = (float)m_winY + (b.y - hh + PotMaxY(b.angle, p.scale));
 
     // 任务栏上沿永远是"最底的地面"
     if (surface > m_floorY) surface = m_floorY;
@@ -2658,7 +2883,7 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TaskbarPlant"));
     app.setApplicationDisplayName(QStringLiteral("桌面电子盆栽"));
-    app.setApplicationVersion(QStringLiteral("1.1"));
+    app.setApplicationVersion(QStringLiteral("1.2.0"));
     app.setQuitOnLastWindowClosed(false);
 
     // ---- 命令行参数 ----
@@ -2678,17 +2903,30 @@ int main(int argc, char** argv)
             QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
             QStringLiteral("factor"),
             QStringLiteral("1.0"));
+        QCommandLineOption optProbe(
+            QStringLiteral("probe-menu"),
+            QStringLiteral("构建右键菜单但不弹出，输出尺寸后退出（无头测试用）。"));
         QCommandLineOption optDump(
             QStringLiteral("dump-plants"),
             QStringLiteral("把十三种植物渲染成一张 PNG 后退出。"),
             QStringLiteral("path"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
+        cmd.addOption(optProbe);
         cmd.addOption(optDump);
         cmd.process(app);
 
+        if (cmd.isSet(QStringLiteral("probe-menu"))) {
+            Garden g;
+            g.start();
+            QSize sz = g.window() ? g.window()->probeMenuSize() : QSize();
+            tbpLog(QStringLiteral("menu: %1x%2").arg(sz.width()).arg(sz.height()));
+            return sz.isEmpty() ? 2 : 0;
+        }
+
         if (cmd.isSet(optDump)) {
-            g_scale = 1.0f;
+            g_baseScale = 1.0f;
+            g_scale = g_baseScale;
             return DumpPlants(cmd.value(optDump)) ? 0 : 1;
         }
 
@@ -2706,6 +2944,7 @@ int main(int argc, char** argv)
         if (ok && d > 0.3f && d < 5.0f) {
             // Garden::start() 里会重新定 g_scale（它会读 TBP_SCALE），
             // 所以命令行值必须写回环境变量才不会被覆盖。
+            g_baseScale = d;
             g_scale = d;
             qputenv("TBP_SCALE", QByteArray::number(d, 'f', 2));
         }
