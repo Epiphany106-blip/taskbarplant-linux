@@ -903,29 +903,56 @@ static void DrawPlantLocal(QPainter& g, float soilY, PlantType t,
 // -----------------------------------------------------------------------------
 static bool DumpPlants(const QString& path)
 {
-    const int cellW = 130, cellH = 210;
-    const float s = 1.0f;
-    const int cols = 7;
-    const int rows = (PLANT_COUNT + cols - 1) / cols;
+    // 卡片式：深色底 + 花盆 + 植物 + 底部标签
+    const int cellW = 216, cellH = 296;
+    const int cols  = 5;
+    const int rows  = (PLANT_COUNT + cols - 1) / cols;
+
+    const QColor bg      = C(33, 37, 43);
+    const QColor label   = C(150, 158, 172);
+    const QColor divider = C(58, 63, 71);
+
+    const float hh = POT_H * 0.5f;
 
     QImage img(cellW * cols, cellH * rows, QImage::Format_ARGB32_Premultiplied);
-    img.fill(Qt::transparent);
+    img.fill(bg);
 
     QPainter g(&img);
     g.setRenderHint(QPainter::Antialiasing, false);
     g.setRenderHint(QPainter::SmoothPixmapTransform, false);
+    g.setRenderHint(QPainter::TextAntialiasing, true);
+
+    QFont f = g.font();
+    f.setPixelSize(17);
+    g.setFont(f);
 
     for (int i = 0; i < PLANT_COUNT; ++i) {
-        int cx = (i % cols) * cellW + cellW / 2;
-        int ry = (i / cols) * cellH;
-        g.save();
-        g.translate(cx, ry + cellH - 24);
-        g.scale(s, s);
-        DrawPlantLocal(g, 0.0f, (PlantType)i, 0.0f, false, 0.0f);
-        g.restore();
-    }
-    g.end();
+        const int col = i % cols;
+        const int row = i / cols;
 
+        const int inRow = qMin(cols, PLANT_COUNT - row * cols);
+        const int offX  = (cols - inRow) * cellW / 2;
+
+        const int cx    = offX + col * cellW + cellW / 2;
+        const int potCy = row * cellH + cellH - 74;
+
+        g.save();
+        g.translate(cx, potCy);
+        DrawPlantLocal(g, -hh + 3.0f, (PlantType)i, 0.0f, false, 0.0f);
+        DrawPotLocal(g);
+        g.restore();
+
+        g.setPen(label);
+        const QRect labelRc(offX + col * cellW, row * cellH + cellH - 46, cellW, 30);
+        g.drawText(labelRc, Qt::AlignHCenter | Qt::AlignVCenter,
+                   QString::fromUtf8(kPlantNames[i]));
+
+        g.setPen(QPen(divider, 1));
+        g.drawLine(offX + col * cellW + 18, row * cellH + cellH - 6,
+                   offX + (col + 1) * cellW - 18, row * cellH + cellH - 6);
+    }
+
+    g.end();
     return img.save(path);
 }
 
