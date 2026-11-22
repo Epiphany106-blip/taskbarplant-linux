@@ -1,6 +1,10 @@
 // =============================================================================
 //  TaskbarPlant —— 桌面电子盆栽 / Linux (Qt6) 移植版
 //
+//  原版：https://github.com/Ziyi-Zhao-star/TaskbarPlant
+//        由 Ziyi Zhao 发起，代码由 DeepSeek 编写。
+//  本移植版：由 Zirui Liu 发起，代码同样由 DeepSeek 编写。
+//
 //  渲染逻辑 1:1 照搬 TaskbarPlant.cpp（Win32 + GDI+）：
 //    所有绘制都是 4px 网格吸附的离散色块 + 逐行栅格化的像素椭圆，
 //    这里全部翻译成 QPainter::fillRect（关闭抗锯齿），视觉上与原版一致。
