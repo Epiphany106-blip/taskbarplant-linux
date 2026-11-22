@@ -1513,8 +1513,16 @@ private:
 PotWindow::PotWindow(Garden* garden, QWidget* parent)
     : QWidget(parent), m_garden(garden)
 {
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool
+    // 注意：这里必须用 Qt::Window 而不是 Qt::Tool。
+    //
+    // Qt 判断"最后一个主窗口是否关闭"时，Tool / Popup 类型的顶层窗口会被跳过。
+    // 用 Tool 的话，打开导出对话框、再关掉菜单这一瞬间，Qt 会认为已经没有
+    // primary window，于是触发 lastWindowClosed 并且整个应用退出 ——
+    // 即使 setQuitOnLastWindowClosed(false) 也照样退。
+    // 改成 Window + Dock 类型：算主窗口（不会误判），Dock 又不进任务栏。
+    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Window
                    | Qt::NoDropShadowWindowHint | Qt::WindowDoesNotAcceptFocus);
+    setAttribute(Qt::WA_X11NetWmWindowTypeDock, true);   // 不进任务栏
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAttribute(Qt::WA_ShowWithoutActivating, true);
     setAttribute(Qt::WA_NoSystemBackground, true);
