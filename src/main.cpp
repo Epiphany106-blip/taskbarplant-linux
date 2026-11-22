@@ -2305,7 +2305,10 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
         p->swayVel = 3.0f;          // 换植物时晃一下
         p->body.vy = -90.0f * g_scale;        // 轻轻一跳
     } else if (idx == MENU_CMD_WATER) {
-        if (p) p->waterAnim = WATER_DURATION;
+        if (p) {
+            p->waterAnim = WATER_DURATION;
+            p->swayVel += 6.0f;      // 一盆水浇下去的那一下
+        }
     } else if (idx == MENU_CMD_SCALE_UP || idx == MENU_CMD_SCALE_DOWN) {
         if (p) {
             float ns = p->scale + ((idx == MENU_CMD_SCALE_UP) ? POT_SCALE_STEP : -POT_SCALE_STEP);
@@ -2354,7 +2357,9 @@ void Garden::updatePot(Pot& p, float dt)
         p.waterAnim -= dt;
         if (p.waterAnim < 0.0f) p.waterAnim = 0.0f;
         p.moisture = Clampf(p.moisture + dt / 1.2f, 0.0f, 1.0f);
-        p.swayVel += sinf((float)m_time * 20.0f) * 0.04f;   // 被水浇得直晃
+        // 浇水期间的持续晃动。频率取 9.5 rad/s，接近弹簧自身的 ω=√110≈10.5，
+        // 借共振把幅度放大；原来的 0.04 只能推出 sway≈0.04（位移 2px），肉眼看不见。
+        p.swayVel += sinf((float)m_time * 9.5f) * 0.30f;
     } else {
         p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
     }
