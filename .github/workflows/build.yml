@@ -40,8 +40,12 @@ jobs:
         #    不需要 i386/debian:12 那种前缀镜像（那个标签不存在）。
         # ② 不调用 file(1)，精简镜像里没装；用 objdump + uname 代替。
         # ③ chmod 也在容器里做 —— 容器内 root 建的文件，runner 用户改不动权限。
+        # ④ --network host：32 位容器里 Docker 的内置 DNS 经常解析失败
+        #    （i386 那次报 "Temporary failure resolving deb.debian.org"），
+        #    直接借用宿主机网络栈最省事。
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
+            --network host \
             -v "$PWD":/src -w /src \
             debian:12 \
             bash -c '
