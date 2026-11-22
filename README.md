@@ -4,7 +4,9 @@
 
 **[下载最新版](https://github.com/Epiphany106-blip/taskbarplant-linux/releases/latest)** · [技术实现说明](TECHNICAL.md)
 
-![九种植物](docs/plants.png)
+发布包有三个架构：`x86_64`、`aarch64`（ARMv8）、`armv7`（ARMv7）。i686 暂不提供预编译包，请从源码编译。
+
+![十三种植物](docs/plants.png)
 
 ## 来源与致谢
 

@@ -20,8 +20,6 @@ jobs:
         include:
           - platform: linux/amd64
             artifact: taskbarplant-linux-x86_64
-          - platform: linux/386
-            artifact: taskbarplant-linux-i686
           - platform: linux/arm64
             artifact: taskbarplant-linux-aarch64
           - platform: linux/arm/v7
@@ -36,17 +34,15 @@ jobs:
           platforms: all
 
       - name: 容器内编译
-        # ① 统一用 debian:12 —— 它是 multi-arch 镜像，i386 / armv7 / arm64 都在里面，
-        #    不需要 i386/debian:12 那种前缀镜像（那个标签不存在）。
+        # ① 统一用 debian:12 —— 它是 multi-arch 镜像，armv7 / arm64 都在里面，
+        #    不需要 arm32v7/debian:12 那种前缀镜像（那个标签不存在）。
         # ② 不调用 file(1)，精简镜像里没装；用 objdump + uname 代替。
         # ③ chmod 也在容器里做 —— 容器内 root 建的文件，runner 用户改不动权限。
-        # ④ 32 位容器解析不了域名：Docker 内置的 127.0.0.11 在 linux/386
-        #    里不起作用，而镜像自带的 /etc/resolv.conf 仍指向它。
-        #    --network host 不够，必须把宿主的 resolv.conf 覆盖进去。
+        # ④ 不再构建 linux/386：那个容器里 Docker 的 DNS 解析不动，加了
+        #    --network host 和覆盖 resolv.conf 都没解决，投入产出不划算。
+        #    i686 用户请从源码编译。
         run: |
           docker run --rm --platform ${{ matrix.platform }} \
-            --network host \
-            -v /etc/resolv.conf:/etc/resolv.conf:ro \
             -v "$PWD":/src -w /src \
             debian:12 \
             bash -c '
@@ -77,7 +73,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
 
-  # 打 v* tag 时才发版：四个架构全部收齐再一起挂上去
+  # 打 v* tag 时才发版：三个架构全部收齐再一起挂上去
   release:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
