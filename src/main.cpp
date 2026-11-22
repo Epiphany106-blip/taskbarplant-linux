@@ -106,6 +106,10 @@ enum PlantType {
     PLANT_SUCCULENT,
     PLANT_BAMBOO,
     PLANT_ROSE,
+    PLANT_LAVENDER,
+    PLANT_CLOVER,
+    PLANT_CHILI,
+    PLANT_DANDELION,
     PLANT_COUNT
 };
 
@@ -118,12 +122,14 @@ enum MenuCmd {
 
 static const char* kPlantNames[PLANT_COUNT] = {
     "仙人掌", "向日葵", "食人花", "郁金香", "蘑菇",
-    "小松树", "多肉", "竹子", "玫瑰"
+    "小松树", "多肉", "竹子", "玫瑰",
+    "薰衣草", "三叶草", "辣椒", "蒲公英"
 };
 
 static const float kPlantH[PLANT_COUNT] = {
     112.0f, 150.0f, 140.0f, 140.0f, 100.0f,
-    148.0f,  64.0f, 158.0f, 132.0f
+    148.0f,  64.0f, 158.0f, 132.0f,
+    152.0f,  88.0f, 128.0f, 148.0f
 };
 
 // -----------------------------------------------------------------------------
@@ -669,6 +675,200 @@ static void DrawRose(QPainter& g, float soilY, float sway, float t)
     g.restore();
 }
 
+// =============================================================================
+//  薰衣草：三根带弯的细茎，顶端堆五格花穗，奇数行错开半格
+// =============================================================================
+static void DrawLavender(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem     = C(88, 146, 68);
+    const QColor leaf     = C(104, 166, 84);
+    const QColor leafDark = C(72, 130, 58);
+    const QColor budA     = C(152, 106, 202);
+    const QColor budB     = C(116, 74, 170);
+    const QColor budLight = C(198, 160, 236);
+
+    struct Spike { float x, h, ph; };
+    const Spike spikes[3] = {
+        { -14.0f,  96.0f, 0.0f },
+        {   2.0f, 124.0f, 1.1f },
+        {  16.0f,  82.0f, 2.2f }
+    };
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+
+    // 贴地两片细叶
+    DrawPixelLeaf(g, -2.0f,  0.0f, -1, 24.0f, 28.0f, 6.0f, leaf, nullptr);
+    DrawPixelLeaf(g,  2.0f, -4.0f, +1, 20.0f, 26.0f, 6.0f, leafDark, nullptr);
+
+    for (int i = 0; i < 3; ++i) {
+        const Spike& sp = spikes[i];
+        int   rows = (int)floorf(sp.h / PIX + 0.5f);
+        float bend = sway * 14.0f + sinf(t * 0.9f + sp.ph) * 2.0f;
+
+        // 茎：4px 宽，逐格往上，越靠上弯得越多
+        for (int r = 0; r < rows; ++r) {
+            float k  = (float)r / (float)rows;
+            float dx = SnapPx(sp.x + bend * k * k);
+            FillRectF(g, stem, dx - PIX * 0.5f, -(float)(r + 1) * PIX, PIX, PIX);
+        }
+
+        // 花穗：茎尖往上堆 5 格，奇偶行左右错开半格
+        float tipX = SnapPx(sp.x + bend);
+        float tipY = -(float)rows * PIX;
+        for (int j = 0; j < 5; ++j) {
+            float y   = tipY - (float)(j + 1) * PIX;
+            QColor main = (j & 1) ? budB : budA;
+            float  off = (j & 1) ? PIX * 0.5f : -PIX * 0.5f;
+            FillRectF(g, main,     tipX - PIX * 1.5f + off, y, PIX * 3.0f, PIX);
+            FillRectF(g, budLight, tipX - PIX * 1.5f + off, y, PIX, PIX);
+        }
+        FillRectF(g, budB, tipX - PIX * 0.5f, tipY - 6.0f * PIX, PIX, PIX);
+    }
+
+    g.restore();
+}
+
+// =============================================================================
+//  三叶草：三片心形像素叶，每片一格一格拼出来
+// =============================================================================
+static void DrawClover(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem      = C(78, 140, 60);
+    const QColor leafA     = C(96, 176, 76);
+    const QColor leafB     = C(70, 146, 58);
+    const QColor leafLight = C(140, 208, 108);
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 6.0f + sinf(t * 0.8f) * 1.2f);
+
+    const float h = 52.0f;
+    FillRectF(g, stem, -PIX * 0.5f, -h, PIX, h);
+    FillRectF(g, stem, -PIX * 2.0f, -h - PIX, PIX * 4.0f, PIX);   // 叶柄分叉
+
+    // 心形叶：7 格宽 / 6 格高，顶行中间留缺口
+    struct LeafPos { float cx, cy; };
+    const LeafPos pos[3] = {
+        { -16.0f, -h - 10.0f },
+        {   0.0f, -h - 18.0f },
+        {  16.0f, -h - 10.0f }
+    };
+    const int rowStart[6] = { -3, -3, -3, -2, -1, 0 };
+    const int rowCount[6] = {  2,  7,  7,  5,  3, 1 };
+    for (int i = 0; i < 3; ++i) {
+        float cx = SnapPx(pos[i].cx + sway * 4.0f);
+        float cy = SnapPx(pos[i].cy);
+        for (int r = 0; r < 6; ++r) {
+            float y = cy + (float)r * PIX;
+            if (r == 0) {
+                // 顶行两个叶瓣，中间断开
+                FillRectF(g, leafA, cx - 3 * PIX, y, 2 * PIX, PIX);
+                FillRectF(g, leafA, cx + 1 * PIX, y, 2 * PIX, PIX);
+                continue;
+            }
+            QColor br = (i & 1) ? leafB : leafA;
+            FillRectF(g, br, cx + (float)rowStart[r] * PIX, y,
+                      (float)rowCount[r] * PIX, PIX);
+        }
+        // 叶脉高光
+        FillRectF(g, leafLight, cx - PIX * 0.5f, cy + PIX, PIX, PIX * 2.0f);
+    }
+
+    g.restore();
+}
+
+// =============================================================================
+//  辣椒：矮灌木 + 三只垂下来的红辣椒
+// =============================================================================
+static void DrawChili(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem     = C(84, 142, 60);
+    const QColor leaf     = C(92, 168, 72);
+    const QColor leafDark = C(64, 126, 52);
+    const QColor pod      = C(212, 58, 46);
+    const QColor podDark  = C(158, 34, 30);
+    const QColor podLight = C(244, 118, 92);
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 6.0f + sinf(t * 0.7f) * 1.0f);
+
+    const float h = 84.0f;
+    FillRectF(g, stem, -PIX * 0.5f, -h - 8.0f, PIX, h + 8.0f);
+
+    // 枝叶
+    DrawPixelLeaf(g, -2.0f, -h * 0.55f, -1, 24.0f, 24.0f, 6.0f, leaf, nullptr);
+    DrawPixelLeaf(g,  2.0f, -h * 0.72f, +1, 22.0f, 24.0f, 6.0f, leafDark, nullptr);
+    DrawPixelLeaf(g, -2.0f, -h * 0.90f, -1, 18.0f, 20.0f, 6.0f, leafDark, nullptr);
+    DrawPixelLeaf(g,  2.0f, -h * 0.98f, +1, 16.0f, 20.0f, 6.0f, leaf, nullptr);
+
+    // 辣椒：8px 宽的红条垂下，尾端收成 4px 尖
+    struct Pod { float x, top, len; };
+    const Pod pods[3] = {
+        { -14.0f, -h * 0.50f, 22.0f },
+        {  12.0f, -h * 0.62f, 26.0f },
+        {   0.0f, -h * 0.78f, 20.0f }
+    };
+    for (int i = 0; i < 3; ++i) {
+        float x    = SnapPx(pods[i].x + sway * 5.0f);
+        float top  = SnapPx(pods[i].top);
+        int   rows = (int)floorf(pods[i].len / PIX + 0.5f);
+        for (int r = 0; r < rows; ++r) {
+            float y = top + (float)r * PIX;
+            FillRectF(g, pod,      x - PIX, y, PIX * 2.0f, PIX);
+            FillRectF(g, podDark,  x + PIX * 0.5f, y, PIX * 0.5f, PIX);
+            FillRectF(g, podLight, x - PIX, y, PIX * 0.5f, PIX);
+        }
+        FillRectF(g, pod, x - PIX * 0.5f, top + (float)rows * PIX, PIX, PIX);
+        FillRectF(g, leafDark, x - PIX * 1.5f, top - PIX, PIX * 3.0f, PIX);  // 蒂
+    }
+
+    g.restore();
+}
+
+// =============================================================================
+//  蒲公英：细茎顶一颗白色绒球，旁边飘走一颗种子
+// =============================================================================
+static void DrawDandelion(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem      = C(122, 158, 82);
+    const QColor stemDark  = C(94, 128, 62);
+    const QColor leaf      = C(104, 170, 78);
+    const QColor puffShade = C(206, 212, 200);
+    const QColor puff      = C(246, 246, 238);
+    const QColor fly       = C(255, 255, 250);
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 8.0f + sinf(t * 1.0f) * 2.0f);
+
+    const float h = 104.0f;
+    FillRectF(g, stem,     -PIX, -h, PIX * 2.0f, h);
+    FillRectF(g, stemDark,  PIX, -h, PIX, h);
+
+    // 贴地叶片（抬高一点，免得被花盆沿挡住）
+    DrawPixelLeaf(g, -2.0f, -10.0f, -1, 34.0f, 30.0f, 6.0f, leaf, nullptr);
+    DrawPixelLeaf(g,  2.0f, -16.0f, +1, 28.0f, 26.0f, 6.0f, leaf, nullptr);
+
+    // 绒球：两层像素圆 + 外圈八颗绒毛
+    const float cx = 0.0f, cy = -h - 12.0f;
+    FillPixelEllipse(g, puffShade, cx, cy, 20.0f, 20.0f);
+    FillPixelEllipse(g, puff,      cx, cy, 16.0f, 16.0f);
+    for (int i = 0; i < 8; ++i) {
+        float a = (float)i * PI_F / 4.0f;
+        FillRectF(g, puff, SnapPx(cx + cosf(a) * 22.0f) - PIX * 0.5f,
+                         SnapPx(cy + sinf(a) * 22.0f) - PIX * 0.5f, PIX, PIX);
+    }
+
+    // 飘走的种子
+    float fx = 28.0f + sinf(t * 0.9f) * 6.0f;
+    float fy = cy - 26.0f + cosf(t * 0.7f) * 4.0f;
+    FillRectF(g, fly, SnapPx(fx), SnapPx(fy), PIX, PIX);
+
+    g.restore();
+}
+
 static inline float PlantHeight(PlantType t)
 {
     return (t >= 0 && t < PLANT_COUNT) ? kPlantH[t] : 110.0f;
@@ -686,9 +886,47 @@ static void DrawPlantLocal(QPainter& g, float soilY, PlantType t,
     case PLANT_SUCCULENT: DrawSucculent(g, soilY, sway, now); break;
     case PLANT_BAMBOO:    DrawBamboo(g, soilY, sway, now); break;
     case PLANT_ROSE:      DrawRose(g, soilY, sway, now); break;
+    case PLANT_LAVENDER:  DrawLavender(g, soilY, sway, now); break;
+    case PLANT_CLOVER:    DrawClover(g, soilY, sway, now); break;
+    case PLANT_CHILI:     DrawChili(g, soilY, sway, now); break;
+    case PLANT_DANDELION: DrawDandelion(g, soilY, sway, now); break;
     case PLANT_SUNFLOWER:
     default:              DrawSunflower(g, soilY, sway, now); break;
     }
+}
+
+// -----------------------------------------------------------------------------
+//  --dump-plants <path>
+//
+//  把十三种植物并排渲染成一张 PNG 后退出。用来生成 README 的展示图，
+//  也方便改了像素数据之后直接看图验证，不用盯着桌面猜。
+// -----------------------------------------------------------------------------
+static bool DumpPlants(const QString& path)
+{
+    const int cellW = 130, cellH = 210;
+    const float s = 1.0f;
+    const int cols = 7;
+    const int rows = (PLANT_COUNT + cols - 1) / cols;
+
+    QImage img(cellW * cols, cellH * rows, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+
+    QPainter g(&img);
+    g.setRenderHint(QPainter::Antialiasing, false);
+    g.setRenderHint(QPainter::SmoothPixmapTransform, false);
+
+    for (int i = 0; i < PLANT_COUNT; ++i) {
+        int cx = (i % cols) * cellW + cellW / 2;
+        int ry = (i / cols) * cellH;
+        g.save();
+        g.translate(cx, ry + cellH - 24);
+        g.scale(s, s);
+        DrawPlantLocal(g, 0.0f, (PlantType)i, 0.0f, false, 0.0f);
+        g.restore();
+    }
+    g.end();
+
+    return img.save(path);
 }
 
 // =============================================================================
@@ -1455,7 +1693,9 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
     static const QColor kDots[PLANT_COUNT] = {
         C(78, 154, 78), C(247, 197, 49), C(150, 60, 70),
         C(226, 78, 106), C(212, 62, 62), C(46, 116, 66),
-        C(126, 180, 134), C(150, 194, 96), C(206, 52, 78)
+        C(126, 180, 134), C(150, 194, 96), C(206, 52, 78),
+        C(152, 106, 202), C(96, 176, 76), C(212, 58, 46),
+        C(240, 240, 226)
     };
     auto dotIcon = [](const QColor& col) {
         QPixmap pm(12, 12);
@@ -2411,9 +2651,19 @@ int main(int argc, char** argv)
             QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
             QStringLiteral("factor"),
             QStringLiteral("1.0"));
+        QCommandLineOption optDump(
+            QStringLiteral("dump-plants"),
+            QStringLiteral("把十三种植物渲染成一张 PNG 后退出。"),
+            QStringLiteral("path"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
+        cmd.addOption(optDump);
         cmd.process(app);
+
+        if (cmd.isSet(optDump)) {
+            g_scale = 1.0f;
+            return DumpPlants(cmd.value(optDump)) ? 0 : 1;
+        }
 
         bool ok = false;
         float d = cmd.value(optDelay).toFloat(&ok);
