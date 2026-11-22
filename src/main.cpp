@@ -1941,6 +1941,51 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
 }
 
 // -----------------------------------------------------------------------------
+//  交互式导出：弹保存对话框后把当前花盆写成 PNG
+//
+//  两个坑：
+//   1. 父窗口必须给 nullptr。PotWindow 是全屏透明穿透窗口，拿它当父窗口时
+//      对话框会被它的输入区域/置顶属性牵连，表现是弹不出来或者一闪就没。
+//   2. 不能用系统原生对话框。KDE 下 Qt 会转给 xdg-desktop-portal，
+//      portal 不可用时进程直接退出，终端里连错误都没有。
+// -----------------------------------------------------------------------------
+static void exportPotInteractive(Pot& pot)
+{
+    const QString name = QString::fromUtf8(kPlantNames[pot.plant])
+                       + QStringLiteral(".png");
+
+    tbpLog(QStringLiteral("export: opening dialog"));
+
+    // 用实例而不是静态函数，才能强制置顶。PotWindow 是 WindowStaysOnTop 的
+    // 全屏窗口，普通对话框会被它压在下面 —— 表现就是"点了导出没反应"。
+    QFileDialog dlg(nullptr, QStringLiteral("导出植物图片"),
+                    QDir::homePath() + QStringLiteral("/") + name,
+                    QStringLiteral("PNG 图片 (*.png)"));
+    dlg.setOption(QFileDialog::DontUseNativeDialog, true);
+    dlg.setAcceptMode(QFileDialog::AcceptSave);
+    dlg.setFileMode(QFileDialog::AnyFile);
+    dlg.setDefaultSuffix(QStringLiteral("png"));
+    dlg.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    dlg.setWindowModality(Qt::ApplicationModal);
+
+    if (dlg.exec() != QDialog::Accepted) {
+        tbpLog(QStringLiteral("export: cancelled"));
+        return;
+    }
+    QString path = dlg.selectedFiles().value(0);
+    tbpLog(QStringLiteral("export: chosen '%1'").arg(path));
+
+    if (path.isEmpty()) return;
+    if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+        path += QStringLiteral(".png");
+
+    const bool ok = ExportPotPng(pot, path);
+    tbpLog(QStringLiteral("export: save %1 -> %2").arg(ok ? QStringLiteral("ok")
+                                                          : QStringLiteral("FAILED"),
+                                                       path));
+}
+
+// -----------------------------------------------------------------------------
 //  Garden
 // -----------------------------------------------------------------------------
 Garden::Garden() {}
@@ -2264,19 +2309,7 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
             m_win->requestFullRepaint();
         }
     } else if (idx == MENU_CMD_EXPORT) {
-        if (p) {
-            const QString name = QString::fromUtf8(kPlantNames[p->plant])
-                               + QStringLiteral(".png");
-            QString path = QFileDialog::getSaveFileName(
-                m_win, QStringLiteral("导出植物图片"),
-                QDir::homePath() + QStringLiteral("/") + name,
-                QStringLiteral("PNG 图片 (*.png)"));
-            if (!path.isEmpty()) {
-                if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
-                    path += QStringLiteral(".png");
-                ExportPotPng(*p, path);
-            }
-        }
+        if (p) exportPotInteractive(*p);
     } else if (idx == MENU_CMD_SPAWN) {
         spawnPot(mx, my, p ? p->plant : PLANT_SUNFLOWER);
     } else if (idx == MENU_CMD_REMOVE) {
@@ -2903,6 +2936,10 @@ int main(int argc, char** argv)
             QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
             QStringLiteral("factor"),
             QStringLiteral("1.0"));
+        QCommandLineOption optExport(
+            QStringLiteral("export"),
+            QStringLiteral("直接把第一个花盆导出成 PNG 后退出（不弹对话框，测试用）。"),
+            QStringLiteral("path"));
         QCommandLineOption optProbe(
             QStringLiteral("probe-menu"),
             QStringLiteral("构建右键菜单但不弹出，输出尺寸后退出（无头测试用）。"));
@@ -2912,9 +2949,22 @@ int main(int argc, char** argv)
             QStringLiteral("path"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
+        cmd.addOption(optExport);
         cmd.addOption(optProbe);
         cmd.addOption(optDump);
         cmd.process(app);
+
+        // --export <path>：直接把第一盆导出成 PNG，不弹对话框。
+        // 用来验证渲染和存盘本身，把"对话框"这个变量排除掉。
+        if (cmd.isSet(QStringLiteral("export"))) {
+            Garden g;
+            g.start();
+            if (g.pots().empty()) return 3;
+            const bool ok = ExportPotPng(g.pots()[0], cmd.value(QStringLiteral("export")));
+            tbpLog(QStringLiteral("export: direct %1").arg(ok ? QStringLiteral("ok")
+                                                              : QStringLiteral("FAILED")));
+            return ok ? 0 : 4;
+        }
 
         if (cmd.isSet(QStringLiteral("probe-menu"))) {
             Garden g;
