@@ -48,11 +48,13 @@
 
 实现细节、平台层的坑、以及从原版继承并修掉的 bug，都在 **[TECHNICAL.md](TECHNICAL.md)**。
 
-三句话版本：
+几句话版本：
 
 - 点击穿透要自己设 XShape 的 `ShapeInput`，`setMask` 只管绘制不管输入
 - Wayland 下拿不到其它窗口的位置，靠 KWin 脚本桥把 `frameGeometry` 推过来
 - 花盆回正是弹簧 + 重心失稳，不是单纯的插值
+- 枯萎在 `FillRectF` 这一层做颜色插值，十三种植物的绘制函数一行没改
+- 悬浮层不能用 `Qt::Tool`，否则菜单一关 Qt 就认为没有主窗口了，整个应用退出
 
 ## 构建
 

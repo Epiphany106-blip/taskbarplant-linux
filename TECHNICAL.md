@@ -43,6 +43,8 @@ Wayland 协议禁止客户端查询其它应用的窗口位置，`_NET_CLIENT_LI
 
 `prevLowestAbs` 必须初始化成花盆当前位置。留成 `-1e9` 的话第一帧会把任何顶边都当成"刚跨过去"，花盆启动时会瞬间被吸到屏幕最上方。
 
+同理，单盆缩放变化时要手工重算 `prevLowestAbs`：尺寸变了，上一帧的最低点就不再可比，否则会被判成"刚刚跨过顶边"，花盆会突然跳到某个窗口上。
+
 ## 回正：重心失稳 + 弹簧
 
 花盆倾斜时不是简单"往竖直方向插值"，而是分三段：
@@ -56,6 +58,108 @@ Wayland 协议禁止客户端查询其它应用的窗口位置，`_NET_CLIENT_LI
 实现上只改 `angVel`，`angle` 的积分交给物理段，这样撞到窗口或地面时旋转动量才能正确传递。
 
 调参没有靠反复编译试，而是用 Python 按 `dt=1/60` 复现同样的积分顺序，先算出过冲、周期、收敛时间，再写进 C++。物理手感这种东西，能提前算就别盲试。
+
+## 枯萎：在绘制基本元上做，而不是改十三个函数
+
+缺水时要让叶子从绿变枯黄。直觉做法是给每种植物的绘制函数加一个"枯萎程度"参数，但那意味着改十三个函数、每个函数里挑出"哪些是叶子"。
+
+实际做法是在最底层的 `FillRectF` 里做颜色插值：凡是**绿色分量同时大于红蓝**的色块，就往枯黄 `rgb(158,124,66)` 方向按比例混合。一处改动，十三种植物全部覆盖。
+
+这个判断规则的副作用正好是可接受的：花（粉、红、黄）和花盆（棕）的绿色分量都不占优，不会被染色。如果哪天加了绿叶配红花的植物，这条规则依然成立。
+
+枯萎程度由 `moisture` 算出，只在绘制期作为全局临时值存在：
+
+```cpp
+g_wiltAmount = (g_wiltEnabled && p.moisture < DRY_THRESHOLD)
+               ? (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD
+               : 0.0f;
+```
+
+`--no-wilt` 只是把这个值和水分衰减一起关掉。三处检查点：水分不再衰减（恒为 1.0）、碎屑不生成、绘制枯萎量为 0。关掉之后连"浇水"都变成空操作，不会出现"点了没反应但状态变了"的困惑。
+
+## 浇水晃动：一次冲量，而不是持续激励
+
+第一版写的是每帧叠加 `sin(t) * 0.04` 的持续激励。结果完全看不出来。
+
+原因是数量级。茎的摆动是个 `k=110, c=6.5` 的阻尼弹簧，每帧 0.04 的激励在稳态下只能把 `sway` 推到 0.04 左右，而绘制时茎顶偏移是 `sway * 46`——**2 像素**。自然频率 `√110 ≈ 10.5 rad/s`，帧长 1/60 秒，等于每帧都在同相位上推，能量根本进不去。
+
+改成浇水瞬间给一次冲量 `swayVel += 6.0`，之后交给弹簧自然衰减：
+
+| 时间 | 茎顶位移 |
+| --- | --- |
+| 0.1s | +15px |
+| 0.3s | 过竖直 |
+| 0.5s | −4px |
+| 1.2s | 归零 |
+
+试过"冲量 + 持续共振激励"的组合，反而不好看——一直抖，像被风吹。一次刺激、两下回弹、一秒多平静，才像"被浇了一下"。
+
+教训：调手感先算数量级，别先写代码。`0.04` 和 `6.0` 差 150 倍，不是调参能救的。
+
+## 枯叶碎屑
+
+缺水时从植株上掉叶子。三个细节：
+
+**生成位置**要在植物本地坐标里取（花盆中心为原点，`ly` 为负表示往上），再按花盆的旋转和缩放转到世界坐标：
+
+```cpp
+w.x = b.x + (lx * ca - ly * sa) * p.scale;
+w.y = (b.y - hh) + (lx * sa + ly * ca) * p.scale;
+```
+
+不这么做的话，花盆翻倒或放大之后，叶子会从错误的位置掉出来。
+
+**物理参数**和泥土碎屑完全不同：重力 420（泥土是 1800），另加一个正弦横向飘动，落地就贴住。叶子轻，飘，不弹。
+
+**必须计入脏矩形**。碎屑每帧都在动，漏了就是一条条拖影——这个坑投影已经踩过一次。
+
+上限 240 个、寿命 3 秒，掉落间隔从 0.55 秒（刚缺水）压到 0.15 秒（全枯）。
+
+## 单盆缩放：不改函数签名的代价
+
+十三种植物的绘制函数都用全局 `g_scale` 换算 `PIX`。要给单个花盆加缩放，最干净的办法是不动它们——绘制前后临时把 `g_scale` 换成 `g_baseScale * p.scale`，画完还原：
+
+```cpp
+g_scale = g_baseScale * p.scale;
+DrawPlantLocal(...);
+DrawPotLocal(g);
+g_scale = savedScale;
+```
+
+好处是十三个函数一行都不用改。代价是**所有绕过绘制、自己算尺寸的地方都要记得乘 `p.scale`**，漏一处就是 bug：
+
+| 位置 | 漏了会怎样 |
+| --- | --- |
+| `PotMaxY()` | 旋转包围盒偏小，翻倒时花盆底部穿进承托面 |
+| `pickPot()` | 缩放后点不中（实际发生过的 bug） |
+| `dragTo()` 的边界夹取 | 拖到屏幕边缘时允许拖出界 |
+
+`pickPot` 里连命中判定的容差都要跟着缩放：`K` 常量乘 `g_scale * p.scale`，不是只乘 `g_scale`。
+
+用全局变量做临时的"当前绘制上下文"是有代价的写法，但在这里比改十三个函数签名划算。前提是**只在单一调用栈内改、改完立刻还原**，不能跨帧留存。
+
+## 右键菜单：QWidgetAction 与可探测
+
+上游是双列布局，`QMenu::addAction` 做不出来。做法是把整个面板塞进一个 `QWidgetAction`：
+
+```
+QMenu（只当弹出容器，透明背景、无边框）
+└── QWidgetAction
+    └── QWidget#menuPanel（深色底 + 橙色边框）
+        ├── QGridLayout  13 个 QToolButton，两列
+        ├── QFrame       分隔线
+        └── 7 个 QToolButton  命令，单列
+```
+
+右键点在空白处时，"浇水 / 缩放 / 导出"这些需要当前花盆的命令要灰掉；只剩一个花盆时"移除"也要灰掉——否则输入区域会变空，右键再也点不出来。
+
+菜单构建被抽成了独立的 `populateMenu(QMenu&, int pot, int* chosen)`，因为**无头环境下没法真的右键**。抽出来之后 `--probe-menu` 可以只构建不弹出，量出尺寸：
+
+```
+menu: 240x445
+```
+
+445px 在 1080p（可用高度 1034）下放得下。这个检查比"肉眼看菜单有没有被截断"可靠得多，也是唯一能在 CI 里跑的部分。
 
 ## 从原版继承并修掉的 bug
 
@@ -74,12 +178,71 @@ b.angVel += 0.4f * (b.angVel >= 0.0f ? 1.0f : -1.0f);
 
 另一处是原版的回正是纯几何插值（`angle += -angle * 0.15f`），没有重心失稳概念，也没有加速度感。这里换成了弹簧动力学。
 
+## 导出：一个窗口类型引发的退出
+
+最费劲的一个 bug。现象：右键「导出植物图片」，文件确实存下来了，然后**进程消失**，终端里没有任何错误。
+
+日志一步步把范围缩小：
+
+```
+export: opening dialog
+!!! lastWindowClosed fired      ← 对话框刚打开就触发
+export: chosen '/home/...'
+export: save ok -> ...
+event loop exited rc=0          ← 正常退出，不是崩溃
+```
+
+`rc=0` 说明不是段错误，是 Qt 自己退出的。根因是窗口类型：悬浮层原来是 `Qt::Tool`，而 **Qt 判断"最后一个主窗口是否关闭"时会跳过 `Tool` 和 `Popup`**。菜单一关，Qt 认为应用已经没有主窗口了，而 `setQuitOnLastWindowClosed(false)` 拦不住这个判定。
+
+改成 `Qt::Window` + `WA_X11NetWmWindowTypeDock`（Dock 不进任务栏，观感不变）之后，`lastWindowClosed` 只在真正退出时触发。
+
+顺带解决了另外三个叠加的问题：
+
+1. **对话框被挡住**——悬浮层是全屏 `WindowStaysOnTop`，普通对话框弹在它下面，用户以为"点了没反应"。对话框改成实例 + `setWindowFlag(Qt::WindowStaysOnTopHint)`。
+2. **原生对话框会带走进程**——KDE 下静态 `QFileDialog::getSaveFileName` 转给 `xdg-desktop-portal`，portal 不可用时静默退出。强制 `DontUseNativeDialog`。
+3. **菜单 grab 与嵌套模态冲突**——`QMenu::exec` 抓鼠标键盘，在它的点击回调里立刻开模态对话框会把事件循环搞坏。用 `QTimer::singleShot(0, ...)` 推迟到下一轮。
+
+四个问题里只有第 1 个是"看不见"，其余三个都会导致进程退出。`rc=0` 加 `lastWindowClosed` 那行日志是唯一的线索。
+
 ## 渲染
 
 - 悬浮层只设 `ShapeInput`，不设 `ShapeBounding`（理由见第一段）
 - 每帧算脏矩形（当前帧 ∪ 上一帧），先 `CompositionMode_Source` 涂透明再画
 - 脏矩形必须包含投影：投影画在承托面上，花盆悬空时和花盆包围盒完全不重叠
+- 脏矩形也要包含枯叶碎屑，否则飘落时拖影
 - 输入区域每帧重设时可能丢掉 `mouseRelease`，所以 tick 里额外检查全局左键状态，松开了就强制结束拖拽
+- 单盆缩放变化时必须整屏重画（`requestFullRepaint()`），旧尺寸留下的像素不在新脏矩形里
+
+## 无头验证
+
+桌面程序最难的是"改了看不到"。这里攒了一套不需要显示器的检查，全部在 offscreen 下跑：
+
+| 手段 | 验证什么 |
+| --- | --- |
+| `--dump-plants <path>` | 十三种植物渲染成卡片图，改像素数据后直接看图 |
+| `TBP_WILT=0.8` + `--dump-plants` | 枯叶配色（强制指定枯萎程度） |
+| `--probe-menu` | 双列菜单的尺寸计算对不对 |
+| `--export <path>` | 导出链路，不经过对话框 |
+| `TBP_TRACE=1` 跑几秒 | 物理判定、水分、碎屑计数 |
+
+`QT_QPA_PLATFORM=offscreen` 下 `QApplication` 能正常构造，但 menus 弹不出来、没有输入事件——所以菜单只能量尺寸，交互必须真的右键。
+
+这套东西也是 CI 能跑冒烟测试的前提：第一次配 CI 时忘了加 `QT_QPA_PLATFORM=offscreen`，容器里没有 X，`QApplication` 加载 xcb 插件失败后直接 `abort()`（exit 134）。
+
+## 构建与分发
+
+二进制由 GitHub Actions 在 Debian 12 容器里构建，而不是在有桌面环境的机器上直接编。
+
+原因很直接：**glibc 的符号版本是绑定的**。在 openSUSE Tumbleweed 上编出来的可执行文件要求 glibc 2.43，Ubuntu 24.04（2.39）、Debian 12（2.36）、Fedora 41（2.40）全都跑不了。换到 Debian 12 容器里编，要求降到 2.34，覆盖 Debian 12+ / Ubuntu 22.04+ / Fedora 35+ / RHEL 9+。
+
+三个架构：`x86_64`、`aarch64`、`armv7`。后两个在 x86 runner 上靠 QEMU 执行 `moc`/`uic`，各要几分钟。
+
+**i686 不提供**：`linux/386` 容器里 DNS 解析不动，`apt-get update` 全部 `Temporary failure resolving 'deb.debian.org'`。`--network host` 和把宿主 `/etc/resolv.conf` 覆盖进去都无效——而同样是 32 位的 armv7 完全正常，所以不是"32 位容器"的普遍问题，是那个特定镜像的问题。投入产出不划算，i686 用户从源码编译。
+
+CI 的结构上有两个坑：
+
+- **job 级 `if` 不能引用 `matrix`**。`if: matrix.tagOnly != true` 会让整个 workflow 加载失败，表现是 run 显示 failure 但 `jobs` 是空的。matrix 在 job 条件求值时还没展开。正解是拆成两个 job（`build` 每次提交编 x86_64，`build-arm` 只在 tag 时编 ARM），构建步骤用 YAML 锚点 `&build-steps` / `*build-steps` 复用。
+- **main 的提交和它对应的 tag 会各触发一次完整构建**。同一个 commit 编两遍，ARM 那两个纯浪费。现在 main 只编 x86_64（约 1 分钟，够判断"能不能过"），tag 才跑全架构，另外加了 `concurrency` 让同一 ref 的连续推送取消旧的那次。
 
 ## 调试
 
@@ -87,9 +250,11 @@ b.angVel += 0.4f * (b.angVel >= 0.0f ? 1.0f : -1.0f);
 
 ```
 support: n=.. kwin=.. cx=.. prev=.. cur=.. |x,y wxh[H][L][A] => HIT/miss <top>
-pot: x=.. y=.. surf=.. shadow=.. vy=.. drag=.. hit=.. deg=.. rise=.. wait=..
+pot: x=.. y=.. surf=.. shadow=.. vy=.. drag=.. hit=.. deg=.. rise=.. wait=.. moist=.. wilt=..
 ```
 
 `H` 表示水平覆盖，`L` 表示在花盆下方，`A` 表示上一帧已在下方。这几个标记能一眼看出判定卡在哪一步。
 
 `busctl --user monitor --match "type='method_call',interface='org.taskbarplant.Geometry'"` 可以直接看到 KWin 推上来的 JSON，不需要注册服务，排查脚本是否正常时最有效。
+
+所有诊断输出走 `stderr`，不是日志文件。桌面程序写在 `~/.cache` 里的日志在闪退时往往来不及 flush，而前台运行时终端里的输出是立刻可见的。
