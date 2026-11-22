@@ -10,8 +10,17 @@ on:
 permissions:
   contents: write
 
+# 同一个 ref 只保留最新一次运行，避免连续推送时排队堆积。
+# tag 与 main 是不同的 ref，不会互相取消。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    # main 上的普通提交只编 x86_64，用来快速验证能过；
+    # arm64 / armv7 走 QEMU，几分钟一个，只在打 tag 时才编。
+    if: ${{ github.ref_type == 'tag' || matrix.tagOnly != true }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -22,8 +31,10 @@ jobs:
             artifact: taskbarplant-linux-x86_64
           - platform: linux/arm64
             artifact: taskbarplant-linux-aarch64
+            tagOnly: true
           - platform: linux/arm/v7
             artifact: taskbarplant-linux-armv7
+            tagOnly: true
 
     steps:
       - uses: actions/checkout@v5
