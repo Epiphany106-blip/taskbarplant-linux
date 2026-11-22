@@ -1944,9 +1944,7 @@ void PotWindow::contextMenuEvent(QContextMenuEvent* e)
     int chosen = -2;
     populateMenu(menu, pot, &chosen);
     menu.exec(e->globalPos());
-    tbpLog(QStringLiteral("menu: closed chosen=%1").arg(chosen));
     if (chosen != -2) m_garden->applyMenuChoice(chosen, mx, my);
-    tbpLog(QStringLiteral("menu: handler done"));
     e->accept();
 }
 
@@ -1993,7 +1991,6 @@ static void exportPotInteractive(Pot& pot, QWidget* parent)
     tbpLog(QStringLiteral("export: save %1 -> %2").arg(ok ? QStringLiteral("ok")
                                                           : QStringLiteral("FAILED"),
                                                        path));
-    tbpLog(QStringLiteral("export: done, returning to event loop"));
 }
 
 // -----------------------------------------------------------------------------
@@ -2954,6 +2951,11 @@ int main(int argc, char** argv)
             QStringLiteral("整体缩放，默认 1.0（原版比例）。"),
             QStringLiteral("factor"),
             QStringLiteral("1.0"));
+        QCommandLineOption optDry(
+            QStringLiteral("dry-seconds"),
+            QStringLiteral("泥土从湿透到干透的秒数，默认 1800（30 分钟）。调小可以快速看到枯萎。"),
+            QStringLiteral("sec"),
+            QStringLiteral("1800"));
         QCommandLineOption optExport(
             QStringLiteral("export"),
             QStringLiteral("直接把第一个花盆导出成 PNG 后退出（不弹对话框，测试用）。"),
@@ -2967,6 +2969,7 @@ int main(int argc, char** argv)
             QStringLiteral("path"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
+        cmd.addOption(optDry);
         cmd.addOption(optExport);
         cmd.addOption(optProbe);
         cmd.addOption(optDump);
@@ -2999,6 +3002,14 @@ int main(int argc, char** argv)
         }
 
         bool ok = false;
+
+        float dry = cmd.value(optDry).toFloat(&ok);
+        if (ok && dry >= 5.0f && dry <= 86400.0f) {
+            g_drySeconds = dry;
+        } else if (ok) {
+            fprintf(stderr, "[tbp] --dry-seconds 需要 5~86400 之间的秒数，已用默认 1800\n");
+        }
+
         float d = cmd.value(optDelay).toFloat(&ok);
         if (ok && d >= 0.0f && d <= 120.0f) {
             g_uprightDelay = d;
@@ -3017,7 +3028,8 @@ int main(int argc, char** argv)
             qputenv("TBP_SCALE", QByteArray::number(d, 'f', 2));
         }
 
-        fprintf(stderr, "[tbp] upright-delay=%.1fs scale=%.2f\n", g_uprightDelay, g_scale);
+        fprintf(stderr, "[tbp] upright-delay=%.1fs scale=%.2f dry=%.0fs\n",
+                g_uprightDelay, g_scale, g_drySeconds);
         fflush(stderr);
     }
 
@@ -3068,7 +3080,7 @@ int main(int argc, char** argv)
     // 诊断：lastWindowClosed 若在这里触发，说明 Qt 认为没有"主窗口"了。
     // PotWindow 是 Qt::Tool，按 Qt 的定义不算 primary window。
     QObject::connect(&app, &QGuiApplication::lastWindowClosed, []() {
-        tbpLog(QStringLiteral("!!! lastWindowClosed fired"));
+        tbpLog(QStringLiteral("app: last window closed, exiting"));
     });
     app.setQuitOnLastWindowClosed(false);
 
