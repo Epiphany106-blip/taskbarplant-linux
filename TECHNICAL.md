@@ -382,7 +382,38 @@ CI 的结构上有两个坑：
 
 - 正式版 tag 形如 `v1.3.0`，预览版 tag 形如 `v1.3.0-rc.1`。CI 用 `contains(github.ref_name, '-rc')` 判断是否标记为 Pre-release，所以 `-rc` / `-beta` / `-alpha` 后缀都会进预览通道。
 - **预览版发布后永久保留**，正式版发布时不删除、不覆盖。每个预览版都是独立的时间线快照。
-- 版本号只有一个来源：`src/main.cpp` 里的 `setApplicationVersion()`。改版本 = 改那一行 + 打 tag，CI 会自己构建并挂到 Release 上。
+- 版本号只有一个来源：构建期由 `cmake/gen_version.cmake` 从 git tag 判定，生成 `tbp_version.h`。改版本 = 打 tag，源码里没有版本字符串可改。
+
+## 版本号：为什么不写死在源码里
+
+一开始的写法是 `setApplicationVersion("1.3.0-rc.1")` 写在 `main()` 里，发版时手动改一行。问题是它必然会漂：打完 tag 忘了改、改了忘打 tag、手编出来的二进制自称正式版……全都发生过。
+
+现在改成构建期判定：
+
+```
+git describe --tags --exact-match HEAD
+```
+
+- 成功（HEAD 正好在一个 tag 上）→ 用 tag 的版本号
+- 失败（任何未打 tag 的提交）→ `<基线版本>-canary`
+
+`-canary` 是必须的，不是装饰。它回答的问题是"我手上这个二进制是不是 GitHub 上那个"。手动编译的二进制版本号里带 canary，就不会有人拿着它去报"1.3.0 有 bug"。
+
+两个实现细节：
+
+- **判定必须放在构建期，不能放在 configure 期。** `execute_process` 在 `CMakeLists.txt` 顶层跑的话，结果进了 CMake 缓存 —— 打完 tag 再 `cmake --build`，configure 不一定重跑，版本号就停在旧值上。实测确认过。
+- **`add_custom_target` 每次都要跑，不能用 `add_custom_command(OUTPUT ...)`。** 增量规则下头文件一旦生成就不再重算，同样会停在旧值。代价是每轮构建都起一个 cmake 子进程 —— 脚本内部自己比较内容，没变就不写文件，所以不会引起无谓重编。
+
+## 隐藏调试模式
+
+上游 v3.8.2 的做法：菜单底部放一行版本号，连点 7 次（间隔超 3 秒清零）开出调试工具条。第 1~6 次静默、不关菜单、不给任何提示 —— 这是有意的，调试入口不该让人误触。
+
+移植版把它拆成两件事：
+
+- **版本号那一行**放在 `populateMenu()` 里，是个普通 `QToolButton`，但点击**不关菜单**（其余菜单项点了就关）。点满 7 次才设 `chosenOut = MENU_CMD_VERSION` 并 `menu.close()`，由 `contextMenuEvent` 走正常的 `applyMenuChoice` 路径。
+- **工具条**是独立的 Qt 顶层窗口，不是画在主窗口里。主窗口是"全屏 + 精确输入区域 + 点击穿透"，往里面塞 UI 就得把工具条矩形并进每帧重算的 `QRegion`，收益远小于成本。独立窗口自带输入区域，关掉再开也不留状态。
+
+「下雨」「下雪」两个按钮置灰：天气系统（雨雪云积水积雪分区）还没移植，按钮摆着是为了让调试面板的布局定下来，点不动是因为真没实现 —— 置灰加 tooltip 说明，比点了没反应诚实。
 
 ## 调试
 

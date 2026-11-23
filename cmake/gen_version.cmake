@@ -38,9 +38,22 @@ endif()
 # 只保留 [0-9A-Za-z.+-]，防止 tag 里出现奇怪字符把 C 字符串弄坏
 string(REGEX REPLACE "[^0-9A-Za-z.+-]" "_" _ver "${_ver}")
 
-file(WRITE "${OUT_FILE}"
+file(WRITE "${OUT_FILE}.tmp"
 "// 由 cmake/gen_version.cmake 自动生成，请勿手改。\n"
 "#pragma once\n"
 "#define TBP_VERSION \"${_ver}\"\n")
+
+# 只有内容真的变了才覆盖。
+# 直接 file(WRITE) 每次都更新时间戳，会让依赖它的源文件每轮都重编；
+# 而不写又会在打完 tag 后停在旧版本号上 —— 这里用"内容比较"两头都占住。
+set(_old "")
+if(EXISTS "${OUT_FILE}")
+  file(READ "${OUT_FILE}" _old)
+endif()
+file(READ "${OUT_FILE}.tmp" _new)
+if(NOT _old STREQUAL _new)
+  file(WRITE "${OUT_FILE}" "${_new}")
+endif()
+file(REMOVE "${OUT_FILE}.tmp")
 
 message(STATUS "TaskbarPlant version: ${_ver}")

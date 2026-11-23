@@ -28,21 +28,22 @@ set(TBP_BASE_VERSION "1.3.0")
 set(TBP_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/tbp_version.h")
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
-add_custom_command(
-  OUTPUT "${TBP_VERSION_HEADER}"
+# 每次都跑（不要 OUTPUT/DEPENDS 那套增量规则）：
+# 增量规则下，头文件一旦生成就不再重跑，打完 tag 重新编译版本号会停在旧值。
+# 脚本内部自己比较内容，没变就不写文件，所以不会引起无谓重编。
+add_custom_target(tbp_version_header ALL
   COMMAND ${CMAKE_COMMAND}
           -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
           -DOUT_FILE=${TBP_VERSION_HEADER}
           -DBASE_VERSION=${TBP_BASE_VERSION}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_version.cmake
-  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_version.cmake
+  BYPRODUCTS "${TBP_VERSION_HEADER}"
   COMMENT "Detecting version (git tag)"
   VERBATIM)
 
 # kwin_bridge.js 打进 Qt 资源，程序运行时再释放到 ~/.local/share 交给 KWin 加载
 add_executable(taskbarplant src/main.cpp src/resources.qrc)
 target_link_libraries(taskbarplant PRIVATE Qt6::Widgets Qt6::Gui)
-add_custom_target(tbp_version_header DEPENDS "${TBP_VERSION_HEADER}")
 add_dependencies(taskbarplant tbp_version_header)
 target_include_directories(taskbarplant PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
