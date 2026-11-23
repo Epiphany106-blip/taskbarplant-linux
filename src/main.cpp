@@ -1459,10 +1459,445 @@ static inline float WindForce(float t)
                  + 2.5f * sinf(t * 3.1f + 0.7f));
 }
 
-// 天气系统的"风雨增幅"。本移植版尚未移植天气，恒为 0；
-// 保留这个变量是为了让下面的风力和摆动上限公式与上游保持一致，
-// 以后加天气时只需要更新它的值。
+// 天气系统的"风雨增幅"。降水期间平滑升到 1，晴天回落到 0。
+// 风力和摆动上限都乘它 —— 下雨下雪时植物晃得更厉害。
 static float g_storm = 0.0f;
+
+// =============================================================================
+//  一·五、天气系统（上游 v3.7，v3.8 / v3.8.1 / v3.8.2 / v3.8.3 的调整全部同步）
+//
+//  照搬上游这一段：三个粒子结构、区域聚类、调度、积水积雪演化、云的绘制，
+//  以及植物冠层积雪点表。只依赖花盆列表 / 窗口宽度 / 地面高度 / 时间，
+//  没有任何平台相关的东西。
+// =============================================================================
+enum WeatherKind { WEATHER_CLEAR = 0, WEATHER_RAIN, WEATHER_SNOW };
+
+struct RainDrop  { float x, y, vy; };                 // 竖直下落的雨线
+struct SnowFlake { float x, y, vy, ph, amp; };        // 横向摇摆着飘的雪花
+struct Splash    { float x, y, vx, vy, life; };       // 落水 / 砸盆溅起的水珠
+struct WeatherZone { float l, r, top; };              // 一个降水区域的包围盒
+struct SnowSpot  { float x, y, hw; };                 // 冠层上能积雪的一个点
+
+static const float PUDDLE_MAX     = 6.0f;             // 积水最大深度 px
+static const float SNOW_MAX       = 6.0f;             // 积雪最大厚度 px
+static const float RAIN_SPEED_MIN = 900.0f;           // 雨滴下落速度 px/s
+static const float RAIN_SPEED_MAX = 1250.0f;
+static const float WEATHER_ZONE_GAP = 240.0f;         // 簇与簇之间允许的最大空隙 px
+
+static int   g_weather      = WEATHER_CLEAR;
+static float g_weatherTimer = 25.0f;    // 晴天时距下一次"掷骰子"的倒计时（秒）
+static float g_weatherLeft  = 0.0f;     // 当前降水的剩余时间（秒）
+static float g_precip       = 0.0f;     // 降水强度 0~1（起雨 / 停雨平滑过渡）
+static float g_puddle       = 0.0f;     // 任务栏上沿的积水深度 px
+static float g_snowCover    = 0.0f;     // 地面与植物上的积雪厚度 px
+static int   g_lastWeather  = WEATHER_CLEAR;  // 上一次的天气（切换时清空另一种粒子）
+
+static std::vector<RainDrop>    g_rain;
+static std::vector<SnowFlake>   g_flakes;
+static std::vector<Splash>      g_splash;
+static std::vector<WeatherZone> g_zones;
+
+// 天气区域（v3.8.1 分区，v3.8.3 实时化）：
+// 按 x 给花盆排序聚类，相邻两盆的空隙超过 WEATHER_ZONE_GAP 就分成两簇，
+// 各自下各自的雨雪，不再把降水洒在两盆之间的空地上。
+// 每帧都随花盆当前位置重算 —— 拖拽中的花盆实时跟着走。
+// 没有花盆时返回空区域：一盆都没有就不该下雨（v3.8.3 之前的全屏兜底是 bug）。
+static void RebuildWeatherZones(const std::vector<Pot>& pots, int winW, float floorY)
+{
+    g_zones.clear();
+    if (pots.empty() || winW <= 0) return;
+
+    std::vector<size_t> order(pots.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    // 盆数很少，插入排序足够
+    for (size_t i = 1; i < order.size(); ++i)
+        for (size_t j = i; j > 0 && pots[order[j]].body.x < pots[order[j - 1]].body.x; --j) {
+            size_t t = order[j]; order[j] = order[j - 1]; order[j - 1] = t;
+        }
+
+    float cl = 1e9f, cr = -1e9f, ctop = 1e9f;
+    for (size_t i = 0; i < order.size(); ++i) {
+        const Pot& p = pots[order[i]];
+        const float halfW = (POT_W * 0.5f + 44.0f) * p.scale;
+        const float pTop  = p.body.y - POT_H * 0.5f * p.scale
+                          - (PlantHeight(p.plant) + 44.0f) * p.scale;
+
+        if (cl <= cr && p.body.x - halfW - cr > WEATHER_ZONE_GAP) {
+            WeatherZone z = { Clampf(cl, 0.0f, (float)winW),
+                              Clampf(cr, 0.0f, (float)winW),
+                              Clampf(ctop - 60.0f, 20.0f, floorY - 80.0f) };
+            g_zones.push_back(z);
+            cl = 1e9f; cr = -1e9f; ctop = 1e9f;
+        }
+        if (p.body.x - halfW < cl) cl = p.body.x - halfW;
+        if (p.body.x + halfW > cr) cr = p.body.x + halfW;
+        if (pTop < ctop) ctop = pTop;
+    }
+    if (cl <= cr) {
+        WeatherZone z = { Clampf(cl, 0.0f, (float)winW),
+                          Clampf(cr, 0.0f, (float)winW),
+                          Clampf(ctop - 60.0f, 20.0f, floorY - 80.0f) };
+        g_zones.push_back(z);
+    }
+}
+
+// 水珠：花盆砸进积水 / 雨滴落地时溅起
+static void SpawnSplash(float x, float y, int count)
+{
+    if (g_splash.size() > 120) return;
+    for (int i = 0; i < count; ++i) {
+        Splash s;
+        s.x = x + (float)((rand() % 61) - 30);
+        s.y = y - (float)(rand() % 3);
+        s.vx = (float)((rand() % 220) - 110);
+        s.vy = -(float)(150 + rand() % 160);
+        s.life = 0.35f + (float)(rand() % 20) / 100.0f;
+        g_splash.push_back(s);
+    }
+}
+
+static void UpdateWeather(float dt, std::vector<Pot>& pots, int winW, float floorY, float now)
+{
+    // ---- 调度：晴天每 20 秒掷一次骰子，35% 雨 / 17% 雪 ----
+    if (g_weather == WEATHER_CLEAR) {
+        g_weatherTimer -= dt;
+        if (g_weatherTimer <= 0.0f) {
+            g_weatherTimer = 20.0f;
+            const int roll = rand() % 100;
+            if (roll < 35) {                        // 35% 下雨
+                g_weather = WEATHER_RAIN;
+                g_weatherLeft = 18.0f + (float)(rand() % 25);   // 18~42 秒
+            } else if (roll < 52) {                 // 17% 下雪
+                g_weather = WEATHER_SNOW;
+                g_weatherLeft = 25.0f + (float)(rand() % 30);   // 25~54 秒
+            }
+        }
+    } else {
+        g_weatherLeft -= dt;
+        if (g_weatherLeft <= 0.0f) {
+            g_weather = WEATHER_CLEAR;
+            g_weatherTimer = 45.0f + (float)(rand() % 90);      // 雨停后 45~134 秒
+        }
+    }
+
+    // 风力 / 降水强度都平滑过渡，不会一开一停就突兀
+    const float target = (g_weather != WEATHER_CLEAR) ? 1.0f : 0.0f;
+    g_storm  += (target - g_storm)  * Clampf(dt * 0.8f, 0.0f, 1.0f);
+    g_precip += (target - g_precip) * Clampf(dt * 0.6f, 0.0f, 1.0f);
+
+    // 雨雪互斥：切换时立刻清掉另一种粒子，避免同屏重叠
+    if (g_weather != g_lastWeather) {
+        if (g_weather == WEATHER_SNOW)      g_rain.clear();
+        else if (g_weather == WEATHER_RAIN) g_flakes.clear();
+        g_lastWeather = g_weather;
+    }
+
+    RebuildWeatherZones(pots, winW, floorY);
+
+    // ---- 粒子生成：每个区域按宽度铺密度，密度乘 g_precip 做平滑起落 ----
+    for (size_t zi = 0; zi < g_zones.size(); ++zi) {
+        const WeatherZone& z = g_zones[zi];
+        const float zw = z.r - z.l;
+        if (zw < 20.0f) continue;
+
+        if (g_weather == WEATHER_RAIN && g_rain.size() < 70) {
+            int n = (int)(zw / 55.0f) + 1;
+            if (n > 6) n = 6;
+            n = (int)(n * g_precip + 0.5f);
+            for (int i = 0; i < n; ++i) {
+                RainDrop d;
+                d.x  = z.l + (float)(rand() % 1000) * 0.001f * zw;
+                // 出生点贴云底（z.top），雨的最上沿与云的最下沿相接
+                d.y  = z.top + (float)(rand() % 5);
+                d.vy = RAIN_SPEED_MIN + (float)(rand() % 1000) * 0.001f
+                     * (RAIN_SPEED_MAX - RAIN_SPEED_MIN);
+                g_rain.push_back(d);
+            }
+        }
+        if (g_weather == WEATHER_SNOW && g_flakes.size() < 150) {
+            int n = (int)(zw / 30.0f) + 1;
+            if (n > 16) n = 16;
+            n = (int)(n * g_precip + 0.5f);
+            for (int i = 0; i < n; ++i) {
+                SnowFlake f;
+                f.x   = z.l + (float)(rand() % 1000) * 0.001f * zw;
+                f.y   = z.top + (float)(rand() % 5);      // 同样贴云底
+                f.vy  = 55.0f + (float)(rand() % 80);
+                f.ph  = (float)(rand() % 628) * 0.01f;
+                f.amp = 10.0f + (float)(rand() % 16);
+                g_flakes.push_back(f);
+            }
+        }
+    }
+
+    // ---- 雨滴：碰到植物补水，落到地面归入积水 ----
+    for (size_t i = 0; i < g_rain.size();) {
+        RainDrop& d = g_rain[i];
+        d.y += d.vy * dt;
+        bool hit = false;
+
+        // 只在真正接触的一瞬判定，不把整个轮廓上方的雨都吸掉
+        for (size_t pi = 0; pi < pots.size(); ++pi) {
+            Pot& p = pots[pi];
+            const float halfW = 30.0f * p.scale;
+            if (d.x < p.body.x - halfW || d.x > p.body.x + halfW) continue;
+            const float topY = p.body.y - POT_H * 0.5f * p.scale
+                             - (PlantHeight(p.plant) + 4.0f) * p.scale;
+            if (d.y >= topY) {
+                p.moisture = Clampf(p.moisture + 0.012f, 0.0f, 1.0f);   // 下雨补水
+                SpawnSplash(d.x, d.y, 2);
+                hit = true;
+                break;
+            }
+        }
+        // 落到地面（积雪上也算）
+        if (!hit && d.y >= floorY - g_snowCover - 2.0f) {
+            if (g_puddle < PUDDLE_MAX) g_puddle += 0.05f;
+            if ((rand() % 3) == 0)
+                SpawnSplash(d.x, floorY - g_puddle - g_snowCover, 2);
+            hit = true;
+        }
+        if (hit || d.y > floorY + 20.0f) {
+            g_rain[i] = g_rain.back();
+            g_rain.pop_back();
+        } else {
+            ++i;
+        }
+    }
+
+    // ---- 雪花：慢慢飘，落地加积雪；风大时横向飘得更远 ----
+    for (size_t i = 0; i < g_flakes.size();) {
+        SnowFlake& f = g_flakes[i];
+        f.y += f.vy * dt;
+        f.x += sinf(now * 0.9f + f.ph) * f.amp * (0.6f + g_storm * 1.6f) * dt;
+        if (f.y >= floorY - g_snowCover) {
+            if (g_snowCover < SNOW_MAX) g_snowCover += 0.05f;
+            g_flakes[i] = g_flakes.back();
+            g_flakes.pop_back();
+        } else {
+            ++i;
+        }
+    }
+
+    // ---- 水珠：轻重力，落地或到时间就消失 ----
+    for (size_t i = 0; i < g_splash.size();) {
+        Splash& s = g_splash[i];
+        s.vy += 1500.0f * dt;
+        s.x += s.vx * dt;
+        s.y += s.vy * dt;
+        s.life -= dt;
+        if (s.life <= 0.0f || s.y > floorY - g_snowCover) {
+            g_splash[i] = g_splash.back();
+            g_splash.pop_back();
+        } else {
+            ++i;
+        }
+    }
+
+    // ---- 积水 / 积雪演化：雪要化成水再消失，融雪汇入积水 ----
+    // 融雪速度按"雪是否接触水"判定：贴着积水就以 0.55/s 快速融化，
+    // 与天气无关（雪天贴水的雪也化）；干燥环境才保留晴天慢融。
+    float melt = dt * 0.08f;
+    if (g_weather == WEATHER_RAIN) melt = dt * 0.55f;
+    if (g_puddle > 0.5f)           melt = dt * 0.55f;
+    if (melt > g_snowCover) melt = g_snowCover;
+    g_snowCover = Clampf(g_snowCover - melt, 0.0f, SNOW_MAX);
+    g_puddle    = Clampf(g_puddle + melt * 0.8f, 0.0f, PUDDLE_MAX);
+
+    if (g_weather == WEATHER_RAIN) {
+        g_puddle = Clampf(g_puddle + dt * 0.30f, 0.0f, PUDDLE_MAX);
+    } else if (g_weather == WEATHER_SNOW) {
+        g_puddle = Clampf(g_puddle - dt * 0.12f, 0.0f, PUDDLE_MAX);
+    } else {
+        g_puddle = Clampf(g_puddle - dt * 0.20f, 0.0f, PUDDLE_MAX);
+    }
+}
+
+// 地面天气层：积水 + 积雪，按区域各画一段（画在花盆后面，盆底压在水雪之上）
+static void DrawWeatherFloor(QPainter& g, const std::vector<Pot>& pots,
+                             int winW, float floorY)
+{
+    RebuildWeatherZones(pots, winW, floorY);
+    for (size_t zi = 0; zi < g_zones.size(); ++zi) {
+        const WeatherZone& z = g_zones[zi];
+        if (z.r <= z.l) continue;
+
+        // 积雪：顶面隔格起伏 + 底部压暗，像自然雪堆
+        if (g_snowCover > 0.5f) {
+            const QColor snow = C(242, 246, 250);
+            const QColor snowShade = C(204, 216, 230);
+            const float y = floorY - g_snowCover;
+            FillRectF(g, snow, z.l, y, z.r - z.l, g_snowCover);
+            for (float x = SnapPx(z.l); x < z.r; x += PIX) {
+                const int cx = (int)(x / PIX);
+                if (cx & 1)
+                    FillRectF(g, snow, x, y - PIX * 0.5f, PIX, PIX * 0.5f);
+                if ((cx & 3) == 0)
+                    FillRectF(g, snowShade, x, floorY - PIX * 0.5f, PIX, PIX * 0.5f);
+            }
+        }
+
+        // 积水：半透明水面（最高时也没过雪的下沿），最上面一条高光
+        if (g_puddle > 0.5f) {
+            const QColor water   = C(64, 138, 198, 150);
+            const QColor waterHi = C(188, 226, 250, 180);
+            const float y = floorY - g_puddle - g_snowCover * 0.5f;
+            FillRectF(g, water,   z.l, y, z.r - z.l, g_puddle);
+            FillRectF(g, waterHi, z.l, y, z.r - z.l, PIX * 0.5f);
+        }
+    }
+}
+
+// 每种植物"能积雪的位置"：花盆局部坐标里真实冠层的顶点集合。
+// 雪只落在这些点上，不再浮在无形的轮廓框上。新增植物时补几行即可。
+static int PlantSnowSpots(PlantType t, SnowSpot* spots, int maxSpots)
+{
+    const float soilY = -POT_H * 0.5f + 3.0f;    // 土面（与 DrawPlantLocal 一致）
+    int n = 0;
+    #define ADD_SPOT(px, py, phw) if (n < maxSpots) { spots[n].x = (px); spots[n].y = (py); spots[n].hw = (phw); ++n; }
+    switch (t) {
+    case PLANT_CACTUS:
+        ADD_SPOT(  0.0f, soilY - 100.0f, 10.0f)     // 主干顶
+        ADD_SPOT(-22.0f, soilY -  94.0f,  5.0f)     // 左臂顶
+        ADD_SPOT( 22.0f, soilY -  78.0f,  5.0f)     // 右臂顶
+        break;
+    case PLANT_SUNFLOWER:
+        ADD_SPOT(0.0f, soilY - 140.0f, 14.0f)       // 花盘顶
+        break;
+    case PLANT_FLYTRAP:
+        ADD_SPOT(0.0f, soilY - 116.0f, 13.0f)       // 颚顶
+        break;
+    case PLANT_TULIP:
+        ADD_SPOT(0.0f, soilY - 122.0f, 13.0f)       // 花苞顶
+        break;
+    case PLANT_MUSHROOM:
+        ADD_SPOT(0.0f, soilY -  76.0f, 12.0f)       // 菌盖顶
+        break;
+    case PLANT_PINE:
+        ADD_SPOT(0.0f, soilY -  72.0f, 20.0f)       // 三层树冠
+        ADD_SPOT(0.0f, soilY - 102.0f, 15.0f)
+        ADD_SPOT(0.0f, soilY - 130.0f, 11.0f)
+        break;
+    case PLANT_SUCCULENT:
+        ADD_SPOT(0.0f, soilY -  66.0f, 28.0f)       // 莲座顶
+        break;
+    case PLANT_BAMBOO:
+        ADD_SPOT(  0.0f, soilY - 158.0f, 3.0f)      // 三根竹竿顶
+        ADD_SPOT(-16.0f, soilY -  98.0f, 3.0f)
+        ADD_SPOT( 20.0f, soilY -  61.0f, 3.0f)
+        break;
+    case PLANT_ROSE:
+        ADD_SPOT(0.0f, soilY - 156.0f, 11.0f)       // 花苞顶
+        break;
+    case PLANT_LAVENDER:
+        ADD_SPOT(-22.0f, soilY - 124.0f, 3.0f)      // 四根花穗顶
+        ADD_SPOT( -3.0f, soilY - 152.0f, 3.0f)
+        ADD_SPOT( 10.0f, soilY -  76.0f, 3.0f)
+        ADD_SPOT( 25.0f, soilY - 112.0f, 3.0f)
+        break;
+    case PLANT_CLOVER:
+        ADD_SPOT(-16.0f, soilY - 62.0f, 9.0f)       // 三片心形叶顶
+        ADD_SPOT(  0.0f, soilY - 70.0f, 9.0f)
+        ADD_SPOT( 16.0f, soilY - 62.0f, 9.0f)
+        break;
+    case PLANT_CHILI:
+        ADD_SPOT(0.0f, soilY - 90.0f, 3.0f)         // 茎顶
+        break;
+    case PLANT_DANDELION:
+        ADD_SPOT(0.0f, soilY - 136.0f, 16.0f)       // 绒球顶
+        break;
+    case PLANT_DAISY:
+        ADD_SPOT(0.0f, soilY - 124.0f, 14.0f)       // 花头顶
+        break;
+    case PLANT_ALOE:
+        ADD_SPOT(  0.0f, soilY - 96.0f, 5.0f)       // 中间最高叶尖
+        ADD_SPOT(-38.0f, soilY - 64.0f, 4.0f)       // 左侧叶尖
+        ADD_SPOT(  8.0f, soilY - 80.0f, 4.0f)       // 前排叶尖
+        ADD_SPOT( 40.0f, soilY - 58.0f, 4.0f)       // 右侧叶尖
+        break;
+    case PLANT_MORNINGGLORY:
+        ADD_SPOT(0.0f, soilY - 162.0f, 14.0f)       // 喇叭口顶
+        break;
+    case PLANT_CHERRY:
+        ADD_SPOT(   0.0f, soilY - 98.0f, 20.0f)     // 主树冠顶
+        ADD_SPOT( -26.0f, soilY - 82.0f, 11.0f)     // 左侧树冠
+        ADD_SPOT(  26.0f, soilY - 82.0f, 11.0f)     // 右侧树冠
+        break;
+    default:
+        ADD_SPOT(0.0f, soilY - PlantHeight(t) + 6.0f, 10.0f)
+        break;
+    }
+    #undef ADD_SPOT
+    return n;
+}
+
+// 植物冠层上的积雪：只在真实冠层顶上铺交错白格，雪厚时再叠一行；盆沿再积一条。
+// 画在花盆局部坐标系里（随花盆一起旋转、缩放）。
+static void DrawSnowCapLocal(QPainter& g, const Pot& p)
+{
+    if (g_snowCover < 0.8f) return;
+    const QColor snow  = C(246, 250, 254);
+    const QColor shade = C(204, 216, 230);
+    const float lv = Clampf(g_snowCover / SNOW_MAX, 0.0f, 1.0f);
+
+    SnowSpot spots[6];
+    const int n = PlantSnowSpots(p.plant, spots, 6);
+    for (int i = 0; i < n; ++i) {
+        const SnowSpot& s = spots[i];
+        const float y = SnapPx(s.y);
+        const int cells = (int)(s.hw / PIX) + 1;
+        // 贴着冠层顶的一行（隔格留缝，露出下面的植物）
+        for (int c = -cells; c <= cells; ++c) {
+            if (((c + i) & 1) != 0) continue;
+            const QColor& br = ((c & 3) == 0) ? shade : snow;
+            FillRectF(g, br, SnapPx(s.x + (float)c * PIX), y - PIX, PIX, PIX);
+        }
+        // 雪厚时在冠层顶上方再叠一行错缝的
+        if (lv > 0.45f) {
+            for (int c = -cells + 1; c <= cells - 1; ++c) {
+                if (((c + i) & 1) == 0) continue;
+                FillRectF(g, snow, SnapPx(s.x + (float)c * PIX), y - PIX * 2.0f, PIX, PIX);
+            }
+        }
+    }
+
+    // 盆沿上的那条雪
+    const float rimDepth = PIX * lv;
+    FillRectF(g, snow, -POT_W * 0.5f, -POT_H * 0.5f - rimDepth, POT_W, rimDepth);
+}
+
+// 天气时的云：一整条云带盖住整个降水区域的落雨面，
+// 云底正好压在粒子生成位置（z.top），像整片天空都在下雨下雪。
+// 顶部凸包用确定性正弦起伏 + 缓慢漂移，无状态，可直接照搬。
+static void DrawClouds(QPainter& g, const std::vector<Pot>& pots,
+                       int winW, float floorY, float now)
+{
+    if (g_precip < 0.02f) return;
+    const int alpha = (int)(Clampf(g_precip, 0.0f, 1.0f) * 185.0f);
+    const QColor cloud      = C(210, 220, 238, alpha);   // 灰蓝云体
+    const QColor cloudLight = C(248, 250, 254, alpha);   // 顶部受光
+    const QColor cloudShade = C(168, 180, 202, alpha);   // 底部阴影
+
+    RebuildWeatherZones(pots, winW, floorY);
+    for (size_t zi = 0; zi < g_zones.size(); ++zi) {
+        const WeatherZone& z = g_zones[zi];
+        const float zw = z.r - z.l;
+        if (zw < 60.0f) continue;
+
+        const float base = z.top;                        // 云底 = 粒子起点
+        FillRectF(g, cloud, z.l, base - 12.0f, zw, 12.0f);
+        const int bumps = (int)(zw / 46.0f) + 1;
+        for (int i = 0; i <= bumps; ++i) {
+            const float bx = z.l + zw * (float)i / (float)bumps
+                           + sinf(now * 0.10f + (float)i * 1.7f + (float)zi) * 6.0f;
+            const float r = 20.0f + 8.0f * sinf((float)i * 2.4f + (float)zi * 1.3f);
+            FillPixelEllipse(g, cloud,      bx, base - 12.0f, r, r * 0.55f);
+            FillPixelEllipse(g, cloudLight, bx, base - 16.0f, r * 0.55f, r * 0.30f);
+        }
+        // 底部阴影条：压出云的厚度
+        FillRectF(g, cloudShade, z.l, base - PIX, zw, PIX);
+    }
+}
 
 
 #if defined(TBP_HAVE_X11)
@@ -1978,6 +2413,36 @@ void PotWindow::updateInputMask()
             cur = cur.united(QRect((int)c.x - 8, (int)c.y - 8, 16, 16));
     }
 
+    // ---- 天气：粒子、地面水雪、云都在动，每帧都要重绘 ----
+    if (!g_rain.empty()) {
+        for (const RainDrop& d : g_rain)
+            cur = cur.united(QRect((int)d.x - 6, (int)d.y - 8, 14, 24));
+    }
+    if (!g_flakes.empty()) {
+        for (const SnowFlake& f : g_flakes)
+            cur = cur.united(QRect((int)f.x - 8, (int)f.y - 8, 16, 16));
+    }
+    if (!g_splash.empty()) {
+        for (const Splash& s : g_splash)
+            cur = cur.united(QRect((int)s.x - 8, (int)s.y - 8, 16, 16));
+    }
+    if (g_puddle > 0.5f || g_snowCover > 0.5f) {
+        RebuildWeatherZones(pots, m_garden->winW(), m_garden->floorY());
+        for (const WeatherZone& z : g_zones) {
+            cur = cur.united(QRect((int)z.l - 4,
+                                   (int)(m_garden->floorY() - g_snowCover - g_puddle - 8.0f),
+                                   (int)(z.r - z.l) + 8,
+                                   (int)(g_snowCover + g_puddle) + 16));
+        }
+    }
+    if (g_precip > 0.02f) {
+        RebuildWeatherZones(pots, m_garden->winW(), m_garden->floorY());
+        for (const WeatherZone& z : g_zones) {
+            cur = cur.united(QRect((int)z.l - 4, (int)z.top - 46,
+                                   (int)(z.r - z.l) + 8, 50));
+        }
+    }
+
     cur = cur.intersected(rect());
 
     QRect dirty = cur;
@@ -2027,6 +2492,21 @@ void PotWindow::paintEvent(QPaintEvent* ev)
 
     const float hh = POT_H * 0.5f;
 
+    const std::vector<Pot>& pots = m_garden->pots();
+    const int   winW   = m_garden->winW();
+    const float floorY = m_garden->floorY();
+    const float now    = m_garden->now();
+
+    // 云画在最底层：一整条云带盖住降水区域，云底压在粒子起点
+    DrawClouds(g, pots, winW, floorY, now);
+
+    // 雨线画在花盆后面：雨从植物身后落下，碰到植物的一瞬才溅起
+    if (!g_rain.empty()) {
+        const QColor rain = C(120, 176, 228, 220);
+        for (size_t i = 0; i < g_rain.size(); ++i)
+            FillRectF(g, rain, g_rain[i].x, g_rain[i].y, PIX, PIX * 2.5f);
+    }
+
     // 泥土碎屑
     const std::vector<Crumb>& crumbs = m_garden->crumbs();
     if (!crumbs.empty()) {
@@ -2034,6 +2514,9 @@ void PotWindow::paintEvent(QPaintEvent* ev)
         for (size_t i = 0; i < crumbs.size(); ++i)
             FillRectF(g, crumb, crumbs[i].x, crumbs[i].y, 3.0f * g_scale, 3.0f * g_scale);
     }
+
+    // 天气地面层：积水 + 积雪（画在花盆后面，盆底会压在水雪之上）
+    DrawWeatherFloor(g, pots, winW, floorY);
 
     // 枯叶碎屑
     const std::vector<Crumb>& wilt = m_garden->wilt();
@@ -2044,20 +2527,21 @@ void PotWindow::paintEvent(QPaintEvent* ev)
             FillRectF(g, (i & 1) ? leafA : leafB, wilt[i].x, wilt[i].y, PIX, PIX);
     }
 
-    const std::vector<Pot>& pots = m_garden->pots();
     for (size_t i = 0; i < pots.size(); ++i) {
         const Pot& p = pots[i];
         const Body& b = p.body;
 
         float lowest = b.y - hh + PotMaxY(b.angle);
 
-        // 承托面上的投影：离地越高越小越淡。
-        // 落点用 shadowY（花盆正下方最近的平面），而不是 surfaceY（实际站住的面）——
-        // 否则花盆悬在窗口上方时，投影会跑到屏幕底部的面板上。
-        float lift = Clampf((p.shadowY - lowest) / 160.0f, 0.0f, 1.0f);
-        float sw = (92.0f - lift * 44.0f) * g_scale;
-        int   sa = (int)(100.0f - lift * 70.0f);
-        FillPixelEllipse(g, C(0, 0, 0, sa), b.x, p.shadowY - 6.0f, sw * 0.5f, 4.0f);
+        // 承托面上的投影：只有拿在手里 / 落在半空时才画（v3.8），
+        // 稳稳放在任务栏或窗口标题栏上不再显示。
+        // 落点仍用 shadowY（正下方最近的平面），不然投影会跑到屏幕底部的面板上。
+        if (lowest < p.surfaceY - 8.0f) {
+            float lift = Clampf((p.shadowY - lowest) / 160.0f, 0.0f, 1.0f);
+            float sw = (92.0f - lift * 44.0f) * g_scale;
+            int   sa = (int)(100.0f - lift * 70.0f);
+            FillPixelEllipse(g, C(0, 0, 0, sa), b.x, p.shadowY - 6.0f, sw * 0.5f, 4.0f);
+        }
 
         // 花盆 + 植物共用同一个变换。单盆缩放通过临时改 g_scale 实现，
         // 这样 DrawPotLocal / DrawPlantLocal 都不必改签名 —— 它们内部全是 PIX 的倍数。
@@ -2073,12 +2557,25 @@ void PotWindow::paintEvent(QPaintEvent* ev)
         g.save();
         g.translate(b.x, b.y - phh);
         g.rotate(b.angle * 57.2957795f);
-        DrawPlantLocal(g, -phh + 3.0f, p.plant, p.sway, p.poking, m_garden->now());
+        DrawPlantLocal(g, -phh + 3.0f, p.plant, p.sway, p.poking, now);
         DrawPotLocal(g);
+        DrawSnowCapLocal(g, p);      // 植物冠层 / 盆沿上的积雪
         g.restore();
 
         g_scale = savedScale;
         g_wiltAmount = savedWilt;
+    }
+
+    // 天气粒子：雪花 / 水珠（雨线已在下层画过）
+    if (!g_flakes.empty()) {
+        const QColor flake = C(240, 246, 252);
+        for (size_t i = 0; i < g_flakes.size(); ++i)
+            FillRectF(g, flake, g_flakes[i].x, g_flakes[i].y, PIX, PIX);
+    }
+    if (!g_splash.empty()) {
+        const QColor drop = C(150, 208, 244, 210);
+        for (size_t i = 0; i < g_splash.size(); ++i)
+            FillRectF(g, drop, g_splash[i].x, g_splash[i].y, PIX, PIX);
     }
 }
 
@@ -2806,13 +3303,11 @@ void Garden::enableDebugMode()
         bf.setFamily(QStringLiteral("Noto Sans CJK SC"));
 
         struct Item { int action; const char* label; bool usable; };
-        // 天气系统还没移植，下雨 / 下雪按钮先摆出来但置灰，
-        // 免得点了没反应让人以为是 bug。
         const Item items[] = {
-            { DBG_DRY,  "干枯",     true  },
-            { DBG_RAIN, "下雨",     false },
-            { DBG_SNOW, "下雪",     false },
-            { DBG_OFF,  "关闭调试", true  },
+            { DBG_DRY,  "干枯",     true },
+            { DBG_RAIN, "下雨",     true },
+            { DBG_SNOW, "下雪",     true },
+            { DBG_OFF,  "关闭调试", true },
         };
         for (const Item& it : items) {
             QToolButton* b = new QToolButton(panel);
@@ -2821,7 +3316,6 @@ void Garden::enableDebugMode()
             b->setFixedSize(110, 36);
             b->setCursor(Qt::PointingHandCursor);
             b->setEnabled(it.usable);
-            if (!it.usable) b->setToolTip(QStringLiteral("天气系统尚未移植"));
             const int act = it.action;
             QObject::connect(b, &QToolButton::clicked, bar, [this, act]() { doDebugAction(act); });
             row->addWidget(b);
@@ -2873,8 +3367,20 @@ void Garden::doDebugAction(int action)
         debugDryAll();
         break;
     case DBG_RAIN:
+        g_weather = WEATHER_RAIN;
+        g_weatherLeft = 30.0f;
+        g_weatherTimer = 90.0f;
+        g_lastWeather = WEATHER_RAIN;
+        g_flakes.clear();
+        tbpLog(QStringLiteral("debug: force rain"));
+        break;
     case DBG_SNOW:
-        // 天气系统未移植，按钮本就置灰；这里兜一层
+        g_weather = WEATHER_SNOW;
+        g_weatherLeft = 30.0f;
+        g_weatherTimer = 90.0f;
+        g_lastWeather = WEATHER_SNOW;
+        g_rain.clear();
+        tbpLog(QStringLiteral("debug: force snow"));
         break;
     case DBG_OFF:
         disableDebugMode();
@@ -3009,6 +3515,9 @@ void Garden::updatePot(Pot& p, float dt)
         if (b.vy > 0.0f) {
             if (b.vy > 260.0f * g_scale) SpawnDust(m_crumbs, b.x, surface, 10);
             float impact = b.vy;
+            // 砸进积水里会溅起水花（v3.7）
+            if (g_puddle > 1.5f && surface >= m_floorY - 1.0f && impact > 200.0f * g_scale)
+                SpawnSplash(b.x, surface - g_puddle, 9);
             b.vy = -b.vy * RESTITUTION;
             if (fabsf(b.vy) < 55.0f * g_scale) b.vy = 0.0f;
             b.vx *= 0.90f;
@@ -3135,6 +3644,9 @@ void Garden::updatePot(Pot& p, float dt)
 
 void Garden::updatePhysics(float dt)
 {
+    // 天气先更新：它会给花盆补水，也会更新风雨增幅 g_storm
+    UpdateWeather(dt, m_pots, m_winW, m_floorY, m_time);
+
     for (size_t i = 0; i < m_pots.size(); ++i)
         updatePot(m_pots[i], dt);
 
@@ -3206,6 +3718,34 @@ void Garden::tick()
     }
 
     updatePhysics(DT);
+
+    // 天气状态：每秒一行（只在 TBP_TRACE 下）
+    if (qEnvironmentVariableIsSet("TBP_TRACE")) {
+        static int wt = 0;
+        if ((wt++ % 60) == 0) {
+            const char* kind = g_weather == WEATHER_RAIN ? "rain"
+                             : (g_weather == WEATHER_SNOW ? "snow" : "clear");
+            tbpLog(QStringLiteral("weather: %1 left=%2 precip=%3 storm=%4 zones=%5 "
+                                  "rain=%6 flakes=%7 splash=%8 puddle=%9 snow=%10")
+                       .arg(kind)
+                       .arg(g_weatherLeft, 0, 'f', 0)
+                       .arg(g_precip, 0, 'f', 2)
+                       .arg(g_storm, 0, 'f', 2)
+                       .arg(g_zones.size())
+                       .arg(g_rain.size())
+                       .arg(g_flakes.size())
+                       .arg(g_splash.size())
+                       .arg(g_puddle, 0, 'f', 2)
+                       .arg(g_snowCover, 0, 'f', 2));
+            for (size_t zi = 0; zi < g_zones.size(); ++zi)
+                tbpLog(QStringLiteral("weather zone[%1]: l=%2 r=%3 top=%4 (w=%5)  winW=%6")
+                           .arg(zi)
+                           .arg((int)g_zones[zi].l).arg((int)g_zones[zi].r)
+                           .arg((int)g_zones[zi].top)
+                           .arg((int)(g_zones[zi].r - g_zones[zi].l))
+                           .arg(m_winW));
+        }
+    }
 
     if (m_win) {
         m_dirty = QRect();
@@ -3579,6 +4119,10 @@ int main(int argc, char** argv)
             QStringLiteral("dump-plants"),
             QStringLiteral("把十三种植物渲染成一张 PNG 后退出。"),
             QStringLiteral("path"));
+        QCommandLineOption optWeather(
+            QStringLiteral("weather"),
+            QStringLiteral("强制天气：rain / snow / clear。不给就按 20 秒一次的随机调度。"),
+            QStringLiteral("kind"));
         cmd.addOption(optDelay);
         cmd.addOption(optScale);
         cmd.addOption(optNoWilt);
@@ -3586,6 +4130,7 @@ int main(int argc, char** argv)
         cmd.addOption(optExport);
         cmd.addOption(optProbe);
         cmd.addOption(optDump);
+        cmd.addOption(optWeather);
         cmd.process(app);
 
         // --export <path>：直接把第一盆导出成 PNG，不弹对话框。
@@ -3647,6 +4192,22 @@ int main(int argc, char** argv)
                 g_uprightDelay, g_scale, g_drySeconds,
                 g_wiltEnabled ? "on" : "off");
         fflush(stderr);
+
+        // --weather rain|snow|clear：强制天气，用来截图 / 无头验证
+        if (cmd.isSet(optWeather)) {
+            const QString w = cmd.value(optWeather).toLower();
+            if (w == QStringLiteral("rain")) {
+                g_weather = WEATHER_RAIN;  g_weatherLeft = 1e9f;  g_lastWeather = WEATHER_RAIN;
+            } else if (w == QStringLiteral("snow")) {
+                g_weather = WEATHER_SNOW;  g_weatherLeft = 1e9f;  g_lastWeather = WEATHER_SNOW;
+            } else if (w == QStringLiteral("clear")) {
+                g_weather = WEATHER_CLEAR; g_weatherLeft = 0.0f;
+            } else {
+                fprintf(stderr, "[tbp] --weather 只认 rain / snow / clear\n");
+            }
+            fprintf(stderr, "[tbp] weather forced: %s\n", qPrintable(w));
+            fflush(stderr);
+        }
     }
 
     srand((unsigned)time(nullptr));
@@ -3697,6 +4258,22 @@ int main(int argc, char** argv)
     QTimer timer;
     QObject::connect(&timer, &QTimer::timeout, [&garden]() { garden.tick(); });
     timer.start(ANIM_INTERVAL);
+
+    // TBP_SCENE_PNG=<path> [TBP_SCENE_AFTER=秒]：跑若干秒后把整个画面截图再退出。
+    // 天气这种东西（云 / 雨 / 雪 / 积水）只能看渲染结果验收，读代码没用。
+    {
+        const QByteArray shot = qgetenv("TBP_SCENE_PNG");
+        if (!shot.isEmpty()) {
+            int secs = qEnvironmentVariableIntValue("TBP_SCENE_AFTER");
+            if (secs <= 0) secs = 4;
+            QTimer::singleShot(secs * 1000, [&garden, shot]() {
+                if (garden.window())
+                    garden.window()->grab().save(QString::fromLocal8Bit(shot));
+                tbpLog(QStringLiteral("scene: saved '%1'").arg(QString::fromLocal8Bit(shot)));
+                qApp->quit();
+            });
+        }
+    }
 
     // 诊断：lastWindowClosed 若在这里触发，说明 Qt 认为没有"主窗口"了。
     // PotWindow 是 Qt::Tool，按 Qt 的定义不算 primary window。
