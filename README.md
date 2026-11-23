@@ -10,7 +10,7 @@
 
 ## 来源与致谢
 
-本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi Zhao 发起、DeepSeek 编写的 Windows 原版**：
+本项目的**渲染逻辑、物理参数、像素画风全部来自 Ziyi Zhao 发起、由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 编写的 Windows 原版**：
 
 **原版仓库 → [Ziyi-Zhao-star/TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant)**
 
@@ -20,7 +20,7 @@
 
 原版在 Windows 上的设计（尤其是那些像素画的细节和手感）值得单独说一句：很好。
 
-原版同样是 DeepSeek 写出来的。上游和下游都是 AI 写代码，人负责提要求、判断对不对。
+原版同样是由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 写出来的。上游和下游都是 AI 写代码，人负责提要求、判断对不对。
 
 ## 特性
 
@@ -145,11 +145,11 @@ TBP_TRACE=1 ./build/taskbarplant
 
 三方协作，各司其职：
 
-- **Ziyi Zhao** — Windows 原版 [TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant) 的发起人。项目方向、像素画、物理手感都由他提出，代码由 DeepSeek 编写。已授权发布本移植版。
+- **Ziyi Zhao** — Windows 原版 [TaskbarPlant](https://github.com/Ziyi-Zhao-star/TaskbarPlant) 的发起人。项目方向、像素画、物理手感都由他提出，代码由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 编写。已授权发布本移植版。
 - **Zirui Liu** — Linux 移植版的发起人。提需求、定方向、做测试反馈。点击穿透、跟随窗口、残影、停在屏幕中间这些问题，都是他一个个测出来的。
-- **DeepSeek V4.1 Flash 1017**（运行在 WorkBuddy 中）— 编写移植版代码并调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它用 `busctl` / `xprop` 排查跑通的。
+- **DeepSeek V4 Flash 1017** 与 **Space Bunny** — 编写移植版代码并调试。平台层的坑（XShape 输入区域、KWin 脚本桥、D-Bus 接口名）大部分是靠它们用 `busctl` / `xprop` 排查跑通的。
 
-两个项目的代码都由 AI 编写，人负责提出要什么、判断对不对。这不是要淡化谁的贡献——方向错了代码再好也没用，但写代码这件事确实不是人做的。
+上游的代码由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 编写，本移植版的代码由 DeepSeek V4 Flash 1017 与 Space Bunny 编写。两边的代码都是 AI 写的，人负责提出要什么、判断对不对。这不是要淡化谁的贡献——方向错了代码再好也没用，但写代码这件事确实不是人做的。
 
 原版只用 Win32 + GDI+，没有任何第三方库。移植版保留了同样的克制：只用 Qt6 做绘制、X11 做点击穿透、KWin 脚本拿窗口位置，除此之外没有运行时依赖。
 
@@ -157,4 +157,4 @@ TBP_TRACE=1 ./build/taskbarplant
 
 MIT，见 [LICENSE](LICENSE)。
 
-这意味着你可以自由使用、修改、分发、商用，唯一要求是保留版权与许可声明。原版 `TaskbarPlant` 由 Ziyi Zhao 发起、DeepSeek 编写，已授权本仓库改编为 Linux 移植版本。
+这意味着你可以自由使用、修改、分发、商用，唯一要求是保留版权与许可声明。原版 `TaskbarPlant` 由 Ziyi Zhao 发起、由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 编写，已授权本仓库改编为 Linux 移植版本。

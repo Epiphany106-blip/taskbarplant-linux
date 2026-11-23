@@ -2,8 +2,8 @@
 //  TaskbarPlant —— 桌面电子盆栽 / Linux (Qt6) 移植版
 //
 //  原版：https://github.com/Ziyi-Zhao-star/TaskbarPlant
-//        由 Ziyi Zhao 发起，代码由 DeepSeek 编写。
-//  本移植版：由 Zirui Liu 发起，代码同样由 DeepSeek 编写。
+//        由 Ziyi Zhao 发起，代码由 DeepSeek V4 Flash 1017 与 GLM 5.3 Flash 编写。
+//  本移植版：由 Zirui Liu 发起，代码由 DeepSeek V4 Flash 1017 与 Space Bunny 编写。
 //
 //  渲染逻辑 1:1 照搬 TaskbarPlant.cpp（Win32 + GDI+）：
 //    所有绘制都是 4px 网格吸附的离散色块 + 逐行栅格化的像素椭圆，
@@ -1087,18 +1087,21 @@ static void DrawMorningGlory(QPainter& g, float soilY, float sway, float t)
     g.translate(SnapPx(tip.x), SnapPx(tip.y) - 4.0f);
     g.rotate(sway * 12.0f + sinf(t * 1.3f) * 3.0f);
 
-    FillRectF(g, petalDark, -4.0f, -8.0f, 8.0f, 8.0f);          // 花萼
+    // 花冠整体放大约 1.3 倍（上游 36×40 → 48×52）。
+    // 上游那个尺寸相对 118 的茎太轻，正视图只剩"紫块夹一条白"，看不出喇叭形。
+    // 每段的宽高都取 4 的倍数，保证仍然落在像素网格上。
+    FillRectF(g, petalDark, -4.0f,  -12.0f,  8.0f, 12.0f);      // 花萼
     // 漏斗管：从下往上逐行加宽
-    FillRectF(g, petal,     -6.0f,  -16.0f, 12.0f, 8.0f);
-    FillRectF(g, petalLight, -6.0f, -16.0f,  4.0f, 8.0f);
-    FillRectF(g, petal,    -12.0f,  -24.0f, 24.0f, 8.0f);
-    FillRectF(g, petalLight, -12.0f, -24.0f,  4.0f, 8.0f);
-    FillRectF(g, petal,    -18.0f,  -32.0f, 36.0f, 8.0f);
-    FillRectF(g, petalDark,  14.0f, -24.0f,  4.0f, 16.0f);      // 右侧背光
+    FillRectF(g, petal,      -8.0f, -20.0f, 16.0f,  8.0f);
+    FillRectF(g, petalLight, -8.0f, -20.0f,  4.0f,  8.0f);
+    FillRectF(g, petal,     -16.0f, -32.0f, 32.0f, 12.0f);
+    FillRectF(g, petalLight, -16.0f, -32.0f,  4.0f, 12.0f);
+    FillRectF(g, petal,     -24.0f, -44.0f, 48.0f, 12.0f);
+    FillRectF(g, petalDark,  18.0f, -32.0f,  6.0f, 20.0f);      // 右侧背光
     // 喇叭口：白色喉部 + 深色星纹（中间再点一撮白）
-    FillRectF(g, throat,   -18.0f,  -40.0f, 36.0f, 8.0f);
-    FillRectF(g, star,      -6.0f,  -40.0f, 12.0f, 8.0f);
-    FillRectF(g, throat,    -2.0f,  -40.0f,  4.0f, 8.0f);
+    FillRectF(g, throat,    -24.0f, -52.0f, 48.0f,  8.0f);
+    FillRectF(g, star,       -8.0f, -52.0f, 16.0f,  8.0f);
+    FillRectF(g, throat,     -2.0f, -52.0f,  4.0f,  8.0f);
 
     g.restore();
 }
@@ -1116,35 +1119,38 @@ static void DrawCherry(QPainter& g, float soilY, float sway, float t)
     const QColor flower   = C(250, 236, 244);
     const QColor petalFly = C(248, 184, 202);
 
-    const float h = 62.0f;      // 树干高
+    // 树干拉高到 88（上游是 62）。上游的树干只有 62 高却顶着三团圆冠，
+    // 比例上整个像一朵粉色蘑菇；拉高之后才像一棵树。
+    const float h = 88.0f;      // 树干高
 
     g.save();
     g.translate(0.0f, SnapPx(soilY));
     g.rotate(sway * 4.0f + sinf(t * 0.9f) * 1.4f);
 
-    // 树干 + 一根小枝
-    FillRectF(g, trunk,     -6.0f, -h, 12.0f, h);
-    FillRectF(g, trunkDark,  2.0f, -h,  4.0f, h);
-    FillRectF(g, trunk,      6.0f, -h + 6.0f, 22.0f, 4.0f);
+    // 树干（比上游细一档：8px 宽）+ 一根小枝
+    FillRectF(g, trunk,     -4.0f, -h, 8.0f, h);
+    FillRectF(g, trunkDark,  1.0f, -h, 3.0f, h);
+    FillRectF(g, trunk,      3.0f, -h + 16.0f, 18.0f, 4.0f);
 
-    // 三团树冠：侧团半径 = 主团 × 1/φ，高处受风摆幅更大
-    FillPixelEllipse(g, blobB, -26.0f + sway * 6.0f, -h - 8.0f,  16.0f, 12.0f);
-    FillPixelEllipse(g, blobB,  26.0f + sway * 8.0f, -h - 6.0f,  16.0f, 12.0f);
-    FillPixelEllipse(g, blobA,   0.0f + sway * 10.0f, -h - 20.0f, 26.0f, 18.0f);
-    FillPixelEllipse(g, blobC,  -8.0f + sway * 10.0f, -h - 26.0f, 12.0f,  8.0f);
-    FillPixelEllipse(g, blobC,  14.0f + sway * 8.0f,  -h - 12.0f,  8.0f,  6.0f);
+    // 树冠：侧团下移并缩小，与主团拉开，不再叠成一个圆盘。
+    // 侧团半径 = 主团 × 1/φ，高处受风摆幅更大。
+    FillPixelEllipse(g, blobB, -24.0f + sway * 6.0f, -h - 4.0f,  14.0f, 10.0f);
+    FillPixelEllipse(g, blobB,  24.0f + sway * 8.0f, -h - 2.0f,  14.0f, 10.0f);
+    FillPixelEllipse(g, blobA,   0.0f + sway * 10.0f, -h - 16.0f, 24.0f, 17.0f);
+    FillPixelEllipse(g, blobC,  -7.0f + sway * 10.0f, -h - 22.0f, 11.0f,  7.0f);
+    FillPixelEllipse(g, blobC,  13.0f + sway * 8.0f,  -h - 10.0f,  7.0f,  6.0f);
 
     // 几朵小白花
-    FillRectF(g, flower, -14.0f + sway * 8.0f,  -h - 22.0f, 4.0f, 4.0f);
-    FillRectF(g, flower,   8.0f + sway * 10.0f, -h - 30.0f, 4.0f, 4.0f);
-    FillRectF(g, flower,  20.0f + sway * 8.0f,  -h - 14.0f, 4.0f, 4.0f);
+    FillRectF(g, flower, -12.0f + sway * 8.0f,  -h - 18.0f, 4.0f, 4.0f);
+    FillRectF(g, flower,   7.0f + sway * 10.0f, -h - 25.0f, 4.0f, 4.0f);
+    FillRectF(g, flower,  18.0f + sway * 8.0f,  -h - 11.0f, 4.0f, 4.0f);
 
     g.restore();
 
     // 飘落的花瓣：从树冠右侧缓缓下坠，落到底再回到树冠循环
     const float pa = fmodf(t * 0.5f, 1.0f);
     const float fx = SnapPx(30.0f + sinf(t * 0.8f) * 10.0f + pa * 14.0f);
-    const float fy = SnapPx(-h - 18.0f + pa * 46.0f + SnapPx(soilY));
+    const float fy = SnapPx(-h - 22.0f + pa * 46.0f + SnapPx(soilY));
     FillRectF(g, petalFly, fx, fy, PIX, PIX);
 }
 
