@@ -29,6 +29,7 @@
 #include <QGridLayout>
 #include <QVBoxLayout>
 #include <QToolButton>
+#include <QPushButton>
 #include <QWidgetAction>
 #include <QFrame>
 #include <QMenu>
@@ -2256,13 +2257,19 @@ void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
     //
     // 这一项不关菜单：连点 7 次才能开出隐藏调试模式，中间关掉菜单就数不满了。
     // 计数窗口 3 秒，静默无提示。点满 7 次后调用方负责关菜单并开面板。
+    //
+    // 不用 mkBtn()：那个会给每一项配一个左侧色块图标、文本左对齐，
+    // 版本号是一行脚注，居中、无图标、更小更灰才对。
     {
-        QToolButton* b = mkBtn(VersionText(), C(120, 108, 96));
-        b->setFixedHeight(24);
-        QFont vf = mf;
-        vf.setPixelSize(11);
-        b->setFont(vf);
-        connect(b, &QToolButton::clicked, [this, &menu, chosenOut, b]() {
+        QPushButton* b = new QPushButton(VersionText(), panel);
+        b->setObjectName(QStringLiteral("versionLabel"));
+        b->setFlat(true);
+        b->setFixedHeight(22);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setFocusPolicy(Qt::NoFocus);   // 别抢菜单的键盘焦点
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+
+        connect(b, &QPushButton::clicked, [this, &menu, chosenOut]() {
             // 静默计数：7 次点完才跳出循环，中间任何提示都不给
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             if (now - g_versionLastClick > kVersionClickWindowMs) g_versionClicks = 0;
@@ -2274,6 +2281,17 @@ void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
             }
         });
         v->addWidget(b);
+
+        panel->setStyleSheet(panel->styleSheet() + QStringLiteral(
+            "#versionLabel {"
+            "  background: transparent;"
+            "  border: none;"
+            "  color: rgb(120, 110, 98);"
+            "  font-size: 11px;"
+            "  text-align: center;"
+            "  padding: 0px;"
+            "}"
+            "#versionLabel:hover { color: rgb(168, 152, 132); }"));
     }
 
     QWidgetAction* wa = new QWidgetAction(&menu);
@@ -2288,6 +2306,13 @@ QSize PotWindow::probeMenuSize()
     populateMenu(menu, 0, &chosen);
     QSize sz = menu.sizeHint();
     if (sz.isEmpty()) sz = menu.geometry().size();
+
+    // TBP_MENU_PNG=<path>：把菜单渲染成图片，用来无头检查字体/对齐/配色
+    const QByteArray png = qgetenv("TBP_MENU_PNG");
+    if (!png.isEmpty() && !sz.isEmpty()) {
+        menu.resize(sz);
+        menu.grab().save(QString::fromLocal8Bit(png));
+    }
     return sz;
 }
 

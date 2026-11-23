@@ -356,10 +356,11 @@ event loop exited rc=0          ← 正常退出，不是崩溃
 | `--dump-plants <path>` | 十七种植物渲染成卡片图，改像素数据后直接看图 |
 | `TBP_WILT=0.8` + `--dump-plants` | 枯叶配色（强制指定枯萎程度） |
 | `--probe-menu` | 双列菜单的尺寸计算对不对 |
+| `TBP_MENU_PNG=<path>` + `--probe-menu` | 把菜单整块渲染成 PNG，检查字体、对齐、配色 |
 | `--export <path>` | 导出链路，不经过对话框 |
 | `TBP_TRACE=1` 跑几秒 | 物理判定、水分、碎屑计数 |
 
-`QT_QPA_PLATFORM=offscreen` 下 `QApplication` 能正常构造，但 menus 弹不出来、没有输入事件——所以菜单只能量尺寸，交互必须真的右键。
+`QT_QPA_PLATFORM=offscreen` 下 `QApplication` 能正常构造，但 menus 弹不出来、没有输入事件——所以菜单只能量尺寸（`TBP_MENU_PNG` 渲染出来看图），交互必须真的右键。
 
 这套东西也是 CI 能跑冒烟测试的前提：第一次配 CI 时忘了加 `QT_QPA_PLATFORM=offscreen`，容器里没有 X，`QApplication` 加载 xcb 插件失败后直接 `abort()`（exit 134）。
 
