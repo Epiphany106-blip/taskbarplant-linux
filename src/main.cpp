@@ -220,17 +220,37 @@ static void FillPixelEllipse(QPainter& g, const QColor& col,
 // 像素叶片：从 (x,y) 往 dir 方向斜着伸出的阶梯叶，逐格收窄
 static void DrawPixelLeaf(QPainter& g, float x, float y, int dir,
                           float len, float span, float halfW,
-                          const QColor& col, const QColor* vein)
+                          const QColor& col, const QColor* vein,
+                          const QColor* shade = nullptr)
 {
     int rows = (int)floorf(len / PIX + 0.5f);
-    if (rows < 1) rows = 1;
+    if (rows < 3) rows = 3;
+    const float y0 = SnapPx(y);
+
     for (int i = 0; i < rows; ++i) {
-        float k  = (float)(i + 1) / (float)rows;
-        float cx = SnapPx(x + (float)dir * span * k);
-        float hw = SnapPx(halfW * (1.0f - k * 0.7f));
+        const float k = (float)(i + 1) / (float)rows;
+
+        // 宽度：前 70% 缓慢收窄（基部饱满），后 30% 迅速收成尖
+        float hw;
+        if (k < 0.7f) hw = halfW * (1.0f - k * 0.42f);
+        else          hw = halfW * (1.0f - 0.7f * 0.42f) * (1.0f - (k - 0.7f) / 0.3f);
+        hw = SnapPx(hw);
         if (hw < PIX * 0.5f) hw = PIX * 0.5f;
-        float yy = SnapPx(y) - (float)(i + 1) * PIX;
+
+        // 横向：匀速斜伸。上游原文写的是分段斜率（前 70% 与后 30% 各一段），
+        // 但两段的系数相乘后都化简成 k，实际渲染就是匀速，这里如实照搬。
+        const float cx = SnapPx(x + (float)dir * span * k);
+
+        // 纵向：前 70% 每行上爬一格，后 30% 每行只爬半格，叶尖放平下垂
+        // （用 rows*PIX 而不是 len：两者在 g_scale=1 时相等，缩放时前者不会错位）
+        const float seg  = 0.7f * (float)rows * PIX;
+        const float rise = (k <= 0.7f)
+                         ? (float)(i + 1) * PIX
+                         : seg + ((float)(i + 1) - 0.7f * (float)rows) * PIX * 0.5f;
+        const float yy = y0 - rise;
+
         FillRectF(g, col, cx - hw, yy, hw * 2.0f, PIX);
+        if (shade) FillRectF(g, *shade, cx - hw, yy + PIX, hw * 2.0f, PIX * 0.5f);
         if (vein && i * 2 < rows)
             FillRectF(g, *vein, cx - PIX * 0.5f, yy, PIX, PIX);
     }
@@ -313,13 +333,21 @@ static PtF DrawBentStem(QPainter& g, float baseX, float baseY, float height,
     return PtF{ tipX, y0 - (float)rows * PIX };
 }
 
-static void DrawLeaf(QPainter& g, float soilY, float height, float p, float sway, int dir)
+static void DrawLeaf(QPainter& g, float soilY, float height, float p, float sway,
+                     int dir, float t)
 {
-    const QColor leaf = C(100, 178, 72);
-    const QColor vein = C(64, 126, 48);
-    float x = sway * 46.0f * g_scale * powf(p, 1.9f);
-    float y = soilY - height * p;
-    DrawPixelLeaf(g, x, y + PIX * 3.0f, dir, 20.0f, 24.0f, 8.0f, leaf, &vein);
+    const QColor leaf  = C(100, 178, 72);
+    const QColor vein  = C(64, 126, 48);
+    const QColor shade = C(56, 112, 44);
+
+    const float x = sway * 46.0f * g_scale * powf(p, 1.9f);
+    const float y = soilY - height * p;
+    // 叶片自身的颤动，越靠叶尖幅度越大（p 是叶位在茎上的比例）。
+    // 吸附到 4px 网格后表现为整格的轻微跳动 —— 像素画式的"呼吸"。
+    const float flutter = sinf(t * 1.9f + height * 0.11f + (float)dir * 2.0f)
+                        * PIX * 2.0f * p;
+    DrawPixelLeaf(g, x + flutter, y + PIX * 3.0f, dir, 26.0f, 30.0f, 9.0f,
+                  leaf, &vein, &shade);
 }
 
 static void DrawSunflowerHead(QPainter& g, float cx, float cy, float sway, float t)
@@ -357,8 +385,9 @@ static void DrawSunflower(QPainter& g, float soilY, float sway, float t)
     const QColor stem = C(76, 142, 58);
     const float h = 108.0f;
     PtF tip = DrawBentStem(g, 0.0f, soilY, h, sway, stem, 7.0f);
-    DrawLeaf(g, soilY, h, 0.34f, sway, -1);
-    DrawLeaf(g, soilY, h, 0.58f, sway, +1);
+    // 叶位取黄金分割点 1/φ² (0.382) 与 1/φ (0.618)，上游 v3.8.2 的美学微调
+    DrawLeaf(g, soilY, h, 0.382f, sway, -1, t);
+    DrawLeaf(g, soilY, h, 0.618f, sway, +1, t);
     DrawSunflowerHead(g, tip.x, tip.y - 10.0f, sway, t);
 }
 
@@ -647,10 +676,11 @@ static void DrawBamboo(QPainter& g, float soilY, float sway, float t)
     const QColor leafDark  = C(84, 142, 56);
 
     struct Stalk { float x, h, ph; };
+    // 三竿高度按 φ 链递减：158 / 158÷φ ≈ 98 / 98÷φ ≈ 61（上游 v3.8.2）
     const Stalk stalks[3] = {
-        { -16.0f, 112.0f, 0.0f },
+        { -16.0f,  98.0f, 0.0f },
         {   0.0f, 158.0f, 1.2f },
-        {  20.0f,  94.0f, 2.4f }
+        {  20.0f,  61.0f, 2.4f }
     };
 
     g.save();
@@ -690,8 +720,9 @@ static void DrawRose(QPainter& g, float soilY, float sway, float t)
     const float h = 124.0f;
     PtF tip = DrawBentStem(g, 0.0f, soilY, h, sway, stem, 5.0f);
 
-    DrawLeaf(g, soilY, h, 0.32f, sway, 1);
-    DrawLeaf(g, soilY, h, 0.55f, sway, -1);
+    // 叶位取黄金分割点（上游 v3.8.2）
+    DrawLeaf(g, soilY, h, 0.382f, sway, 1, t);
+    DrawLeaf(g, soilY, h, 0.618f, sway, -1, t);
     FillRectF(g, thorn, SnapPx(tip.x) - 4.0f, SnapPx(tip.y) + 20.0f, 4.0f, 4.0f);
     FillRectF(g, thorn, SnapPx(tip.x) + 4.0f, SnapPx(tip.y) + 40.0f, 4.0f, 4.0f);
 
@@ -716,49 +747,52 @@ static void DrawRose(QPainter& g, float soilY, float sway, float t)
 static void DrawLavender(QPainter& g, float soilY, float sway, float t)
 {
     const QColor stem     = C(88, 146, 68);
-    const QColor leaf     = C(104, 166, 84);
-    const QColor leafDark = C(72, 130, 58);
     const QColor budA     = C(152, 106, 202);
     const QColor budB     = C(116, 74, 170);
     const QColor budLight = C(198, 160, 236);
 
-    struct Spike { float x, h, ph; };
-    const Spike spikes[3] = {
-        { -14.0f,  96.0f, 0.0f },
-        {   2.0f, 124.0f, 1.1f },
-        {  16.0f,  82.0f, 2.2f }
+    // 上游 v3.8.2 定稿：四穗、苗条、无根部细叶（花穗本身是观赏主体）。
+    // x / 高度错开，穗尖横向间距 ≥ 11px，最矮一根放中前，与右穗完全分离。
+    struct Spike { float x, h, ph, lean; int grains; };
+    const Spike spikes[4] = {
+        { -18.0f,  96.0f, 0.0f, -4.0f, 6 },   // 左后，偏高，左倾
+        {  -6.0f, 120.0f, 1.1f,  3.0f, 7 },   // 最高，右倾
+        {   6.0f,  52.0f, 2.0f,  4.0f, 5 },   // 最矮，中前
+        {  22.0f,  84.0f, 2.9f,  3.0f, 6 }    // 右侧独立一根
     };
 
     g.save();
     g.translate(0.0f, SnapPx(soilY));
 
-    // 贴地两片细叶
-    DrawPixelLeaf(g, -2.0f,  0.0f, -1, 24.0f, 28.0f, 6.0f, leaf, nullptr);
-    DrawPixelLeaf(g,  2.0f, -4.0f, +1, 20.0f, 26.0f, 6.0f, leafDark, nullptr);
-
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 4; ++i) {
         const Spike& sp = spikes[i];
-        int   rows = (int)floorf(sp.h / PIX + 0.5f);
-        float bend = sway * 14.0f + sinf(t * 0.9f + sp.ph) * 2.0f;
+        const int   rows = (int)floorf(sp.h / PIX + 0.5f);
+        const float bend = sway * 10.0f + sinf(t * 0.9f + sp.ph) * 2.0f + sp.lean;
 
-        // 茎：4px 宽，逐格往上，越靠上弯得越多
+        // 茎：一格宽，越靠上越往 bend 方向弯
         for (int r = 0; r < rows; ++r) {
-            float k  = (float)r / (float)rows;
-            float dx = SnapPx(sp.x + bend * k * k);
+            const float k  = (float)r / (float)rows;
+            const float dx = SnapPx(sp.x + bend * k * k);
             FillRectF(g, stem, dx - PIX * 0.5f, -(float)(r + 1) * PIX, PIX, PIX);
         }
 
-        // 花穗：茎尖往上堆 5 格，奇偶行左右错开半格
-        float tipX = SnapPx(sp.x + bend);
-        float tipY = -(float)rows * PIX;
-        for (int j = 0; j < 5; ++j) {
-            float y   = tipY - (float)(j + 1) * PIX;
-            QColor main = (j & 1) ? budB : budA;
-            float  off = (j & 1) ? PIX * 0.5f : -PIX * 0.5f;
-            FillRectF(g, main,     tipX - PIX * 1.5f + off, y, PIX * 3.0f, PIX);
-            FillRectF(g, budLight, tipX - PIX * 1.5f + off, y, PIX, PIX);
+        // 花穗：从茎尖往上 grains 粒。基部两粒占两格宽（有厚度），
+        // 其余全部一格宽（苗条），奇偶行错开半格。
+        const float tipX = SnapPx(sp.x + bend);
+        const float tipY = -(float)rows * PIX;
+        for (int j = 0; j < sp.grains; ++j) {
+            const float y   = tipY - (float)j * PIX;
+            const float w   = PIX * ((j < 2) ? 2.0f : 1.0f);
+            const float off = (j & 1) ? PIX * 0.5f : -PIX * 0.5f;
+            const float gx  = tipX + off;
+            // 每根穗的明暗节奏错开，四根并排时不至于同相
+            const bool  alt = ((j & 1) ^ (i & 1)) != 0;
+            FillRectF(g, alt ? budB : budA, gx - w * 0.5f, y, w, PIX);
+            FillRectF(g, budLight,          gx - w * 0.5f, y, PIX, PIX);
         }
-        FillRectF(g, budB, tipX - PIX * 0.5f, tipY - 6.0f * PIX, PIX, PIX);
+        // 顶芽
+        FillRectF(g, budB, tipX - PIX * 0.5f,
+                  tipY - (float)sp.grains * PIX, PIX, PIX);
     }
 
     g.restore();
@@ -1032,6 +1066,7 @@ struct Pot {
     float     moisture = 1.0f;       // 泥土水分 1=湿透 0=干透
     float     waterAnim = 0.0f;      // 浇水动画剩余时间（秒）
     float     shedTimer = 0.0f;      // 枯叶掉落的节流计时
+    float     windPh = 0.0f;         // 常年微风的相位偏移，每盆错开
 };
 
 static float PotMaxY(float angle, float potScale = 1.0f)
@@ -1154,6 +1189,29 @@ static void tbpLog(const QString& msg)
 }
 
 static inline float Absf(float v) { return v < 0.0f ? -v : v; }
+
+// -----------------------------------------------------------------------------
+//  常年微风（上游 v3.6.0）
+//
+//  让植物在没有交互时也轻轻摇。风是两列以上的正弦叠加，周期互不成整数比，
+//  所以看起来不循环 —— 单一 sin 会让人看出节拍。
+//  返回值 7.5 + 4.0 + 2.5 的量级是"px 级力矩"，直接加在摆动弹簧的速度上。
+// -----------------------------------------------------------------------------
+static inline float WindForce(float t)
+{
+    // 强弱起伏：sin(t * 0.23) 的周期是 2π/0.23 ≈ 27 秒。
+    // （上游注释写的是"约 4.3 秒一阵"，那是把频率 0.23 当成了周期，实际慢得多）
+    const float gust = 0.55f + 0.45f * sinf(t * 0.23f + 0.9f);
+    return gust * (7.5f * sinf(t * 0.7f)
+                 + 4.0f * sinf(t * 1.73f + 1.3f)
+                 + 2.5f * sinf(t * 3.1f + 0.7f));
+}
+
+// 天气系统的"风雨增幅"。本移植版尚未移植天气，恒为 0；
+// 保留这个变量是为了让下面的风力和摆动上限公式与上游保持一致，
+// 以后加天气时只需要更新它的值。
+static float g_storm = 0.0f;
+
 
 #if defined(TBP_HAVE_X11)
 // 桌面 / 面板 / 菜单 / 通知这类窗口不能当"地面"，否则花盆会被顶到屏幕最上方。
@@ -2216,6 +2274,8 @@ void Garden::spawnPot(float x, float y, PlantType plant)
     // 穿越检测的"上一帧最低点"必须初始化成当前位置。
     // 留成 -1e9 的话第一帧会把任何顶边都当成"刚跨过去"，花盆会被吸到屏幕最上方。
     p.prevLowestAbs = p.body.y;
+    // 每盆风相位错开，否则多盆会整齐划一地摇，很假
+    p.windPh = (float)(rand() % 1000) * 0.00628f;      // 0 ~ 2π
     m_pots.push_back(p);
 }
 
@@ -2589,12 +2649,16 @@ void Garden::updatePot(Pot& p, float dt)
         }
     }
 
-    // 植物摆动：阻尼弹簧
-    const float stiffness = 110.0f;
-    const float damping = 6.5f;
+    // 植物摆动：阻尼弹簧（上游 v3.6 调软：更慢、更柔）
+    const float stiffness = 72.0f;               // 原 110：弯得少了，回弹慢了
+    const float damping = 4.6f;                  // 原 6.5：欠阻尼更明显，像有韧性
     p.swayVel += (-stiffness * p.sway - damping * p.swayVel) * dt;
+    // 常年微风：静止时也轻轻摇。驱动频率 0.7 rad/s 远低于固有频率
+    // √72 ≈ 8.5 rad/s，响应近似准静态，表现为缓慢的整体倾倒而不是抖动。
+    p.swayVel += WindForce((float)m_time + p.windPh) * (1.0f + g_storm * 2.2f) * dt;
     p.sway += p.swayVel * dt;
-    p.sway = Clampf(p.sway, -1.3f, 1.3f);
+    const float swayLimit = 1.3f + g_storm * 0.5f;   // 大风天允许摆得更多
+    p.sway = Clampf(p.sway, -swayLimit, swayLimit);
 }
 
 void Garden::updatePhysics(float dt)
