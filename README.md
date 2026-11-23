@@ -25,6 +25,8 @@
 
 带 `-canary` 的意思很直接：**这棵源码树不对应任何已发布版本**。你自己 `cmake --build` 出来的二进制和 GitHub 上下载的归档不会是同一个东西，版本号会如实告诉你。
 
+CI 发版时由 `-DTBP_VERSION_OVERRIDE=<tag>` 显式指定版本，并在容器里跑一次 `--version` 校验——发布产物里出现 `canary` 会直接让构建失败。
+
 运行 `taskbarplant --version` 看版本，右键菜单最底下那行也显示同一个版本号。
 
 ![十七种植物](docs/plants.png)

@@ -19,22 +19,37 @@ if(NOT DEFINED OUT_FILE)
   message(FATAL_ERROR "gen_version.cmake: 缺少 OUT_FILE")
 endif()
 
-set(_ver "${BASE_VERSION}-canary")
+set(_ver "")
 
-find_program(GIT_EXECUTABLE git)
-if(GIT_EXECUTABLE)
-  execute_process(
-    COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match HEAD
-    WORKING_DIRECTORY "${SOURCE_DIR}"
-    OUTPUT_VARIABLE _tag
-    RESULT_VARIABLE _rc
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET)
-  if(_rc EQUAL 0 AND _tag MATCHES "^v(.+)$")
-    set(_ver "${CMAKE_MATCH_1}")
+# -----------------------------------------------------------------------------
+#  第一优先：显式指定（CI 用）
+#
+#  CI 在 tag 构建时把 github.ref_name 直接传进来。这条路径不依赖容器里有没有
+#  git、也不依赖浅克隆是否带 tag —— 版本号是"已知事实"，不该靠探测。
+#  容器里只装了 build-essential 之流，没有 git，探测必失败 → 全部退化成 canary。
+# -----------------------------------------------------------------------------
+if(DEFINED OVERRIDE AND NOT OVERRIDE STREQUAL "")
+  set(_ver "${OVERRIDE}")
+else()
+  # 第二优先：从 git tag 探测（本地手动构建走这条）
+  set(_ver "${BASE_VERSION}-canary")
+  find_program(GIT_EXECUTABLE git)
+  if(GIT_EXECUTABLE)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} describe --tags --exact-match HEAD
+      WORKING_DIRECTORY "${SOURCE_DIR}"
+      OUTPUT_VARIABLE _tag
+      RESULT_VARIABLE _rc
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if(_rc EQUAL 0 AND _tag MATCHES "^v(.+)$")
+      set(_ver "${CMAKE_MATCH_1}")
+    endif()
   endif()
 endif()
 
+# tag 名带 "v" 前缀，版本号里不要
+string(REGEX REPLACE "^v" "" _ver "${_ver}")
 # 只保留 [0-9A-Za-z.+-]，防止 tag 里出现奇怪字符把 C 字符串弄坏
 string(REGEX REPLACE "[^0-9A-Za-z.+-]" "_" _ver "${_ver}")
 

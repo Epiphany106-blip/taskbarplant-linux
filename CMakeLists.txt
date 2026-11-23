@@ -27,6 +27,11 @@ find_package(Qt6 6.4 QUIET COMPONENTS DBus)
 set(TBP_BASE_VERSION "1.3.0")
 set(TBP_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/tbp_version.h")
 
+# CI 在 tag 构建时显式传入 tag 名（-DTBP_VERSION_OVERRIDE=v1.3.0-rc.2）。
+# 不依赖容器内是否有 git —— CI 的 debian:12 容器只装了编译工具链，没有 git，
+# 只靠 `git describe` 探测的话，每个发布版都会退化成 canary。
+set(TBP_VERSION_OVERRIDE "" CACHE STRING "Explicit version override (CI passes the tag name)")
+
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
 # 每次都跑（不要 OUTPUT/DEPENDS 那套增量规则）：
 # 增量规则下，头文件一旦生成就不再重跑，打完 tag 重新编译版本号会停在旧值。
@@ -36,9 +41,10 @@ add_custom_target(tbp_version_header ALL
           -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
           -DOUT_FILE=${TBP_VERSION_HEADER}
           -DBASE_VERSION=${TBP_BASE_VERSION}
+          -DOVERRIDE=${TBP_VERSION_OVERRIDE}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_version.cmake
   BYPRODUCTS "${TBP_VERSION_HEADER}"
-  COMMENT "Detecting version (git tag)"
+  COMMENT "Detecting version"
   VERBATIM)
 
 # kwin_bridge.js 打进 Qt 资源，程序运行时再释放到 ~/.local/share 交给 KWin 加载

@@ -405,6 +405,30 @@ git describe --tags --exact-match HEAD
 - **判定必须放在构建期，不能放在 configure 期。** `execute_process` 在 `CMakeLists.txt` 顶层跑的话，结果进了 CMake 缓存 —— 打完 tag 再 `cmake --build`，configure 不一定重跑，版本号就停在旧值上。实测确认过。
 - **`add_custom_target` 每次都要跑，不能用 `add_custom_command(OUTPUT ...)`。** 增量规则下头文件一旦生成就不再重算，同样会停在旧值。代价是每轮构建都起一个 cmake 子进程 —— 脚本内部自己比较内容，没变就不写文件，所以不会引起无谓重编。
 
+### CI 里不能用 git 探测
+
+这是发 rc2 时才发现的问题：CI 的编译容器是 `debian:12`，只装了 `build-essential cmake qt6-base-dev libx11-dev libxext-dev` —— **没有 git**。`find_program(git)` 找不到，`git describe` 直接失败，于是每个发布版都会静默退化成 `-canary`。
+
+第一版 rc1 的产物就是这么来的：版本号判定逻辑上线时，CI 还没有传版本，二进制里写的是 `1.3.0-canary`。本地构建（有 git、HEAD 又在 tag 上）完全正常，所以看不出来。
+
+修法是两条腿：
+
+1. **CI 显式传版本**：`-DTBP_VERSION_OVERRIDE=${{ github.ref_name }}`。版本号对 CI 来说是"已知事实"，不该靠探测。`gen_version.cmake` 里显式值的优先级高于 git 探测。
+2. **容器内自检**：编译完在容器里真跑一次 `--version`，按整行精确比较期望值。
+
+```bash
+VER=$(QT_QPA_PLATFORM=offscreen ./build/taskbarplant --version 2>/dev/null | tail -1)
+WANT="TaskbarPlant v${TBP_REF#v}"
+[ "$VER" = "$WANT" ] || exit 1
+```
+
+两个坑：
+
+- **必须带 `QT_QPA_PLATFORM=offscreen`。** 容器里没有 X，`--version` 也会构造 `QApplication`，xcb 插件加载失败直接 `abort()`，`VER` 抓出来是空的。
+- **不能写成 `grep -F "$版本"`。** 子串匹配下 `1.3.0-rc.2` 会误中 `1.3.0-rc.20`，发布版校验形同虚设。整行 `=` 比较才对。
+
+自检只在 tag 构建时生效（`TBP_REF` 以 `v` 开头）；`main` 分支的构建照旧是 canary，不拦。
+
 ## 隐藏调试模式
 
 上游 v3.8.2 的做法：菜单底部放一行版本号，连点 7 次（间隔超 3 秒清零）开出调试工具条。第 1~6 次静默、不关菜单、不给任何提示 —— 这是有意的，调试入口不该让人误触。
