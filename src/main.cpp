@@ -129,6 +129,10 @@ enum PlantType {
     PLANT_CLOVER,
     PLANT_CHILI,
     PLANT_DANDELION,
+    PLANT_DAISY,
+    PLANT_ALOE,
+    PLANT_MORNINGGLORY,
+    PLANT_CHERRY,
     PLANT_COUNT
 };
 
@@ -146,13 +150,15 @@ enum MenuCmd {
 static const char* kPlantNames[PLANT_COUNT] = {
     "仙人掌", "向日葵", "食人花", "郁金香", "蘑菇",
     "小松树", "多肉", "竹子", "玫瑰",
-    "薰衣草", "三叶草", "辣椒", "蒲公英"
+    "薰衣草", "三叶草", "辣椒", "蒲公英",
+    "雏菊", "芦荟", "牵牛花", "樱花"
 };
 
 static const float kPlantH[PLANT_COUNT] = {
     112.0f, 150.0f, 140.0f, 140.0f, 100.0f,
     148.0f,  64.0f, 158.0f, 132.0f,
-    152.0f,  88.0f, 128.0f, 148.0f
+    152.0f,  88.0f, 128.0f, 148.0f,
+    132.0f, 104.0f, 168.0f, 132.0f
 };
 
 // -----------------------------------------------------------------------------
@@ -955,6 +961,193 @@ static void DrawDandelion(QPainter& g, float soilY, float sway, float t)
     g.restore();
 }
 
+// =============================================================================
+//  雏菊：细茎 + 两片黄金分割叶位 + 八瓣花头，花头绕茎尖轻摆
+// =============================================================================
+static void DrawDaisy(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem       = C(96, 158, 72);
+    const QColor petal      = C(250, 250, 242);
+    const QColor petalShade = C(216, 220, 204);
+    const QColor core       = C(244, 196, 58);
+    const QColor coreDark   = C(206, 150, 34);
+
+    const float h = 98.0f;
+    const PtF tip = DrawBentStem(g, 0.0f, soilY, h, sway, stem, 6.0f);
+    DrawLeaf(g, soilY, h, 0.382f, sway, -1, t);
+    DrawLeaf(g, soilY, h, 0.618f, sway, +1, t);
+
+    g.save();
+    g.translate(SnapPx(tip.x), SnapPx(tip.y) - 8.0f);
+    g.rotate(sway * 15.0f + sinf(t * 1.5f) * 3.0f);
+
+    // 花瓣：八瓣交错两色，中心补一块白底盘
+    const int n = 8;
+    for (int i = 0; i < n; ++i) {
+        const float a  = (float)i * (2.0f * PI_F) / (float)n;
+        const float px = SnapPx(cosf(a) * 16.0f);
+        const float py = SnapPx(sinf(a) * 16.0f);
+        FillRectF(g, (i & 1) ? petalShade : petal, px - 4.0f, py - 4.0f, 8.0f, 8.0f);
+    }
+    FillPixelEllipse(g, petal,    0.0f, 0.0f, 10.0f, 10.0f);
+    FillPixelEllipse(g, core,     0.0f, 0.0f,  7.0f,  7.0f);
+    FillPixelEllipse(g, coreDark, 2.0f, 2.0f,  3.5f,  3.5f);
+
+    g.restore();
+}
+
+// =============================================================================
+//  芦荟（上游 v3.7 重绘）：后排三片暗叶 + 前排三片亮叶
+//
+//  叶片基部最宽、向上收窄、中段起按 k^1.6 往外弯，尖端收成一格，
+//  前排叶面带一条高光条纹。前排压在后排之上，才有层次。
+// =============================================================================
+static void DrawAloe(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor back       = C(62, 126, 92);
+    const QColor backDark   = C(46, 100, 74);
+    const QColor blade      = C(96, 168, 118);
+    const QColor bladeDark  = C(62, 126, 92);
+    const QColor bladeLight = C(150, 208, 160);
+    const QColor stripe     = C(198, 234, 198);
+
+    struct Frond { float x, h, lean; };
+    const Frond backF[3] = {
+        { -20.0f, 78.0f, -18.0f },
+        {   0.0f, 96.0f,   0.0f },
+        {  20.0f, 74.0f,  20.0f }
+    };
+    const Frond frontF[3] = {
+        { -14.0f, 62.0f, -22.0f },
+        {   2.0f, 80.0f,   6.0f },
+        {  16.0f, 56.0f,  24.0f }
+    };
+
+    struct Pal { QColor main, dark, light; bool stripeOn; };
+    const Pal pals[2] = {
+        { back,  backDark,  backDark,   false },
+        { blade, bladeDark, bladeLight, true  }
+    };
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 4.0f + sinf(t * 0.8f) * 1.0f);
+
+    for (int layer = 0; layer < 2; ++layer) {
+        const Pal& pal = pals[layer];
+        const Frond* fs = (layer == 0) ? backF : frontF;
+        for (int i = 0; i < 3; ++i) {
+            const Frond& f = fs[i];
+            const int rows = (int)floorf(f.h / PIX + 0.5f);
+            for (int r = 0; r < rows; ++r) {
+                const float k  = (float)r / (float)rows;      // 0=根部 1=叶尖
+                const float cx = SnapPx(f.x + f.lean * powf(k, 1.6f) + sway * 5.0f * k);
+                float hw = PIX * (1.5f - k);                   // 基部三格宽 → 尖端一格
+                if (hw < PIX * 0.5f) hw = PIX * 0.5f;
+                const float y = -(float)(r + 1) * PIX;
+                FillRectF(g, pal.main,  cx - hw, y, hw * 2.0f, PIX);
+                FillRectF(g, pal.dark,  cx + hw - PIX * 0.5f, y, PIX * 0.5f, PIX);
+                FillRectF(g, pal.light, cx - hw, y, PIX * 0.5f, PIX);
+                if (pal.stripeOn && k > 0.2f && k < 0.92f)
+                    FillRectF(g, stripe, cx - PIX * 0.5f, y, PIX, PIX);
+            }
+        }
+    }
+
+    g.restore();
+}
+
+// =============================================================================
+//  牵牛花：细茎顶着喇叭形花冠，喇叭口朝上，喉部白色带星纹
+// =============================================================================
+static void DrawMorningGlory(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor stem       = C(84, 148, 66);
+    const QColor leafA      = C(104, 174, 82);
+    const QColor leafB      = C(74, 138, 60);
+    const QColor petal      = C(108, 122, 214);
+    const QColor petalLight = C(150, 160, 240);
+    const QColor petalDark  = C(76, 84, 172);
+    const QColor throat     = C(246, 244, 230);
+    const QColor star       = C(120, 100, 190);
+
+    const float h = 118.0f;
+    const PtF tip = DrawBentStem(g, 0.0f, soilY, h, sway, stem, 6.0f);
+
+    // 两片细长叶
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 8.0f);
+    DrawPixelLeaf(g, 0.0f,  0.0f, -1, 34.0f, 26.0f, 7.0f, leafA, nullptr);
+    DrawPixelLeaf(g, 0.0f, -6.0f, +1, 28.0f, 24.0f, 6.0f, leafB, nullptr);
+    g.restore();
+
+    // 花冠：绕茎尖轻轻摆动
+    g.save();
+    g.translate(SnapPx(tip.x), SnapPx(tip.y) - 4.0f);
+    g.rotate(sway * 12.0f + sinf(t * 1.3f) * 3.0f);
+
+    FillRectF(g, petalDark, -4.0f, -8.0f, 8.0f, 8.0f);          // 花萼
+    // 漏斗管：从下往上逐行加宽
+    FillRectF(g, petal,     -6.0f,  -16.0f, 12.0f, 8.0f);
+    FillRectF(g, petalLight, -6.0f, -16.0f,  4.0f, 8.0f);
+    FillRectF(g, petal,    -12.0f,  -24.0f, 24.0f, 8.0f);
+    FillRectF(g, petalLight, -12.0f, -24.0f,  4.0f, 8.0f);
+    FillRectF(g, petal,    -18.0f,  -32.0f, 36.0f, 8.0f);
+    FillRectF(g, petalDark,  14.0f, -24.0f,  4.0f, 16.0f);      // 右侧背光
+    // 喇叭口：白色喉部 + 深色星纹（中间再点一撮白）
+    FillRectF(g, throat,   -18.0f,  -40.0f, 36.0f, 8.0f);
+    FillRectF(g, star,      -6.0f,  -40.0f, 12.0f, 8.0f);
+    FillRectF(g, throat,    -2.0f,  -40.0f,  4.0f, 8.0f);
+
+    g.restore();
+}
+
+// =============================================================================
+//  樱花：褐色短干 + 三团粉色树冠，树冠里点几朵小白花，旁边飘着一片花瓣
+// =============================================================================
+static void DrawCherry(QPainter& g, float soilY, float sway, float t)
+{
+    const QColor trunk    = C(122, 88, 66);
+    const QColor trunkDark= C(94, 64, 46);
+    const QColor blobA    = C(244, 178, 196);
+    const QColor blobB    = C(224, 142, 168);
+    const QColor blobC    = C(252, 208, 220);
+    const QColor flower   = C(250, 236, 244);
+    const QColor petalFly = C(248, 184, 202);
+
+    const float h = 62.0f;      // 树干高
+
+    g.save();
+    g.translate(0.0f, SnapPx(soilY));
+    g.rotate(sway * 4.0f + sinf(t * 0.9f) * 1.4f);
+
+    // 树干 + 一根小枝
+    FillRectF(g, trunk,     -6.0f, -h, 12.0f, h);
+    FillRectF(g, trunkDark,  2.0f, -h,  4.0f, h);
+    FillRectF(g, trunk,      6.0f, -h + 6.0f, 22.0f, 4.0f);
+
+    // 三团树冠：侧团半径 = 主团 × 1/φ，高处受风摆幅更大
+    FillPixelEllipse(g, blobB, -26.0f + sway * 6.0f, -h - 8.0f,  16.0f, 12.0f);
+    FillPixelEllipse(g, blobB,  26.0f + sway * 8.0f, -h - 6.0f,  16.0f, 12.0f);
+    FillPixelEllipse(g, blobA,   0.0f + sway * 10.0f, -h - 20.0f, 26.0f, 18.0f);
+    FillPixelEllipse(g, blobC,  -8.0f + sway * 10.0f, -h - 26.0f, 12.0f,  8.0f);
+    FillPixelEllipse(g, blobC,  14.0f + sway * 8.0f,  -h - 12.0f,  8.0f,  6.0f);
+
+    // 几朵小白花
+    FillRectF(g, flower, -14.0f + sway * 8.0f,  -h - 22.0f, 4.0f, 4.0f);
+    FillRectF(g, flower,   8.0f + sway * 10.0f, -h - 30.0f, 4.0f, 4.0f);
+    FillRectF(g, flower,  20.0f + sway * 8.0f,  -h - 14.0f, 4.0f, 4.0f);
+
+    g.restore();
+
+    // 飘落的花瓣：从树冠右侧缓缓下坠，落到底再回到树冠循环
+    const float pa = fmodf(t * 0.5f, 1.0f);
+    const float fx = SnapPx(30.0f + sinf(t * 0.8f) * 10.0f + pa * 14.0f);
+    const float fy = SnapPx(-h - 18.0f + pa * 46.0f + SnapPx(soilY));
+    FillRectF(g, petalFly, fx, fy, PIX, PIX);
+}
+
 static inline float PlantHeight(PlantType t)
 {
     return (t >= 0 && t < PLANT_COUNT) ? kPlantH[t] : 110.0f;
@@ -976,6 +1169,10 @@ static void DrawPlantLocal(QPainter& g, float soilY, PlantType t,
     case PLANT_CLOVER:    DrawClover(g, soilY, sway, now); break;
     case PLANT_CHILI:     DrawChili(g, soilY, sway, now); break;
     case PLANT_DANDELION: DrawDandelion(g, soilY, sway, now); break;
+    case PLANT_DAISY:        DrawDaisy(g, soilY, sway, now); break;
+    case PLANT_ALOE:         DrawAloe(g, soilY, sway, now); break;
+    case PLANT_MORNINGGLORY: DrawMorningGlory(g, soilY, sway, now); break;
+    case PLANT_CHERRY:       DrawCherry(g, soilY, sway, now); break;
     case PLANT_SUNFLOWER:
     default:              DrawSunflower(g, soilY, sway, now); break;
     }
@@ -1890,7 +2087,8 @@ void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
         C(226, 78, 106), C(212, 62, 62), C(46, 116, 66),
         C(126, 180, 134), C(150, 194, 96), C(206, 52, 78),
         C(152, 106, 202), C(96, 176, 76), C(212, 58, 46),
-        C(240, 240, 226)
+        C(240, 240, 226),
+        C(244, 196, 58), C(96, 168, 118), C(108, 122, 214), C(244, 178, 196)
     };
     auto dotIcon = [](const QColor& col) {
         QPixmap pm(10, 10);
