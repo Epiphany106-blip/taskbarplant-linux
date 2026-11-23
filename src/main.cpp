@@ -3287,7 +3287,7 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TaskbarPlant"));
     app.setApplicationDisplayName(QStringLiteral("桌面电子盆栽"));
-    app.setApplicationVersion(QStringLiteral("1.2.0"));
+    app.setApplicationVersion(QStringLiteral("1.3.0-rc.1"));
     app.setQuitOnLastWindowClosed(false);
 
     // ---- 命令行参数 ----

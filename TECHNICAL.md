@@ -378,6 +378,12 @@ CI 的结构上有两个坑：
 - **job 级 `if` 不能引用 `matrix`**。`if: matrix.tagOnly != true` 会让整个 workflow 加载失败，表现是 run 显示 failure 但 `jobs` 是空的。matrix 在 job 条件求值时还没展开。正解是拆成两个 job（`build` 每次提交编 x86_64，`build-arm` 只在 tag 时编 ARM），构建步骤用 YAML 锚点 `&build-steps` / `*build-steps` 复用。
 - **main 的提交和它对应的 tag 会各触发一次完整构建**。同一个 commit 编两遍，ARM 那两个纯浪费。现在 main 只编 x86_64（约 1 分钟，够判断"能不能过"），tag 才跑全架构，另外加了 `concurrency` 让同一 ref 的连续推送取消旧的那次。
 
+## 发布策略
+
+- 正式版 tag 形如 `v1.3.0`，预览版 tag 形如 `v1.3.0-rc.1`。CI 用 `contains(github.ref_name, '-rc')` 判断是否标记为 Pre-release，所以 `-rc` / `-beta` / `-alpha` 后缀都会进预览通道。
+- **预览版发布后永久保留**，正式版发布时不删除、不覆盖。每个预览版都是独立的时间线快照。
+- 版本号只有一个来源：`src/main.cpp` 里的 `setApplicationVersion()`。改版本 = 改那一行 + 打 tag，CI 会自己构建并挂到 Release 上。
+
 ## 调试
 
 `TBP_TRACE=1` 会每秒输出两行：
