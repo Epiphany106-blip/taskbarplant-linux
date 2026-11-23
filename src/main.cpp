@@ -2763,9 +2763,39 @@ void Garden::enableDebugMode()
         bar->setAttribute(Qt::WA_DeleteOnClose, false);
 
         QWidget* panel = new QWidget(bar);
+        panel->setObjectName(QStringLiteral("dbgPanel"));
+
+        // 整张样式表一次设完。
+        //
+        // 之前分两次 setStyleSheet 拼接的做法是错的：第一段是"没有选择器的裸声明"
+        // （还缺闭合花括号），Qt 的解析器会把后面拼上来的 QToolButton 规则当成
+        // 非法声明吞掉 —— 结果是背景和边框生效、按钮配色全没生效，
+        // 按钮退回系统调色板：启用态黑字、禁用态浅灰，在深色面板上正好反过来。
         panel->setStyleSheet(QStringLiteral(
-            "background-color: rgb(26,20,16);"
-            "border: 2px solid rgb(196,148,92);"));
+            "#dbgPanel {"
+            "  background-color: rgb(26,20,16);"
+            "  border: 2px solid rgb(196,148,92);"
+            "}"
+            "QToolButton {"
+            "  background-color: rgb(74,52,36);"
+            "  color: rgb(242,234,222);"
+            "  border: 2px solid rgb(150,112,72);"
+            "  padding: 0px;"
+            "}"
+            "QToolButton:hover {"
+            "  background-color: rgb(122,74,42);"
+            "  border-color: rgb(236,190,128);"
+            "  color: rgb(255,248,236);"
+            "}"
+            "QToolButton:pressed {"
+            "  background-color: rgb(56,38,26);"
+            "}"
+            // 禁用态：明显更暗但字还看得清，不要暗到发黑
+            "QToolButton:disabled {"
+            "  background-color: rgb(48,38,30);"
+            "  color: rgb(150,132,114);"
+            "  border-color: rgb(96,78,62);"
+            "}"));
 
         QHBoxLayout* row = new QHBoxLayout(panel);
         row->setContentsMargins(8, 8, 8, 8);
@@ -2797,21 +2827,6 @@ void Garden::enableDebugMode()
             row->addWidget(b);
         }
 
-        panel->setStyleSheet(panel->styleSheet()
-            + QStringLiteral("QToolButton {"
-                             "  background-color: rgb(74,52,36);"
-                             "  color: rgb(246,240,230);"
-                             "  border: 2px solid rgb(150,112,72);"
-                             "}")
-            + QStringLiteral("QToolButton:hover {"
-                             "  background-color: rgb(122,74,42);"
-                             "  border-color: rgb(236,190,128);"
-                             "}")
-            + QStringLiteral("QToolButton:disabled {"
-                             "  color: rgb(110,96,84);"
-                             "  border-color: rgb(82,64,50);"
-                             "}"));
-
         QVBoxLayout* outer = new QVBoxLayout(bar);
         outer->setContentsMargins(0, 0, 0, 0);
         outer->addWidget(panel);
@@ -2828,6 +2843,14 @@ void Garden::enableDebugMode()
 
     m_dbgBar->show();
     m_dbgBar->raise();
+
+    // TBP_DEBUG_BAR_PNG=<path>：把工具条渲染成图片，无头检查配色/字号/对齐。
+    // 和 TBP_MENU_PNG 一个用途 —— 样式问题不能靠读代码确认。
+    const QByteArray shot = qgetenv("TBP_DEBUG_BAR_PNG");
+    if (!shot.isEmpty()) {
+        m_dbgBar->adjustSize();
+        m_dbgBar->grab().save(QString::fromLocal8Bit(shot));
+    }
 
     tbpLog(QStringLiteral("debug: mode on (version %1)").arg(VersionText()));
 }
@@ -3665,6 +3688,11 @@ int main(int argc, char** argv)
 #endif
 
     garden.start();
+
+    // 开发用：TBP_DEBUG_BAR=1 直接开隐藏调试面板，跳过连点 7 次。
+    // 没有这个开关的话，每次调样式都得手动右键点七下，没法自动化验证。
+    if (qEnvironmentVariableIsSet("TBP_DEBUG_BAR"))
+        garden.enableDebugMode();
 
     QTimer timer;
     QObject::connect(&timer, &QTimer::timeout, [&garden]() { garden.tick(); });
