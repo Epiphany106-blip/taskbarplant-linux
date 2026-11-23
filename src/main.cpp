@@ -52,6 +52,18 @@
 #include <QStyle>
 #include <QRegion>
 #include <QImage>
+#include <QDateTime>
+
+// 版本号由构建期从 git tag 判定（cmake/gen_version.cmake 生成这个头文件）。
+// 落在正式版 / 预发布版 tag 上就用 tag 的版本，否则是 "<基线>-canary"。
+#if defined(__has_include)
+#  if __has_include("tbp_version.h")
+#    include "tbp_version.h"
+#  endif
+#endif
+#ifndef TBP_VERSION
+#  define TBP_VERSION "0.0.0-canary"
+#endif
 
 // 注意：这些必须在 <X11/Xlib.h> 之前 —— Xlib 会 #define Bool int、None 0L 之类，
 // 把 QJsonValue::Type 的枚举名替换掉，导致一堆莫名其妙的语法错误。
@@ -144,8 +156,27 @@ enum MenuCmd {
     MENU_CMD_REMOVE,                // 移除这个花盆
     MENU_CMD_EXPORT,                // 导出植物图片
     MENU_CMD_QUIT,                  // 退出程序
+    MENU_CMD_VERSION,               // 版本号（不关菜单，连点 7 次开隐藏调试模式）
     MENU_ITEM_COUNT
 };
+
+// 菜单底部的版本号（上游 v3.8.2：连点 7 次开隐藏调试模式）
+//
+// 版本号本身带 "v" 前缀，和上游一致。构建期由 cmake/gen_version.cmake 从 git tag 判定：
+// 落在正式版 / 预发布版 tag 上就是那个版本号，否则是 "<基线>-canary"。
+static inline QString VersionText() { return QStringLiteral("v") + QString::fromLatin1(TBP_VERSION); }
+
+// ---- 版本号连点计数（隐藏调试模式） ----------------------------------------
+//
+// 静默计数：点第 1~6 次没有任何提示，也不关菜单；点满 7 次才开出调试面板。
+// 两次点击间隔超过 3 秒就重新从头数（上游同样的规则）。
+static const int    kVersionClicksToDebug = 7;
+static const qint64 kVersionClickWindowMs  = 3000;
+static int    g_versionClicks    = 0;
+static qint64 g_versionLastClick = 0;
+
+// 隐藏调试模式的动作
+enum DebugAction { DBG_DRY = 0, DBG_RAIN, DBG_SNOW, DBG_OFF, DBG_COUNT };
 
 static const char* kPlantNames[PLANT_COUNT] = {
     "仙人掌", "向日葵", "食人花", "郁金香", "蘑菇",
@@ -1770,6 +1801,17 @@ public:
 
     void quitWithFade();
 
+    // ---- 隐藏调试模式（上游 v3.8.2）----
+    //
+    // 菜单底部版本号连点 7 次开启。开启后弹出一个独立的小工具条窗口，
+    // 里面是"干枯 / 下雨 / 下雪 / 关闭调试模式"。
+    void enableDebugMode();
+    void disableDebugMode();
+    void doDebugAction(int action);
+
+    bool debugMode() const { return m_debugMode; }
+    void debugDryAll();
+
 private:
     void updatePot(Pot& p, float dt);
     void updatePhysics(float dt);
@@ -1787,6 +1829,10 @@ private:
 
     bool m_layoutReady = false;
     QRect m_dirty;
+
+    // 隐藏调试模式：工具条是个独立顶层窗口，不塞进全屏穿透层
+    bool      m_debugMode = false;
+    QWidget*  m_dbgBar    = nullptr;
 };
 
 // -----------------------------------------------------------------------------
@@ -2203,6 +2249,30 @@ void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
         if (c.id == MENU_CMD_REMOVE)
             b->setEnabled(pot >= 0 && m_garden->pots().size() > 1);
 
+        v->addWidget(b);
+    }
+
+    // ---- 底部版本号（上游 v3.8.2）----
+    //
+    // 这一项不关菜单：连点 7 次才能开出隐藏调试模式，中间关掉菜单就数不满了。
+    // 计数窗口 3 秒，静默无提示。点满 7 次后调用方负责关菜单并开面板。
+    {
+        QToolButton* b = mkBtn(VersionText(), C(120, 108, 96));
+        b->setFixedHeight(24);
+        QFont vf = mf;
+        vf.setPixelSize(11);
+        b->setFont(vf);
+        connect(b, &QToolButton::clicked, [this, &menu, chosenOut, b]() {
+            // 静默计数：7 次点完才跳出循环，中间任何提示都不给
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (now - g_versionLastClick > kVersionClickWindowMs) g_versionClicks = 0;
+            g_versionLastClick = now;
+            if (++g_versionClicks >= kVersionClicksToDebug) {
+                g_versionClicks = 0;
+                *chosenOut = MENU_CMD_VERSION;   // 让 exec() 返回后由调用方开面板
+                menu.close();
+            }
+        });
         v->addWidget(b);
     }
 
@@ -2635,6 +2705,10 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
         }
     } else if (idx == MENU_CMD_QUIT) {
         quitWithFade();
+    } else if (idx == MENU_CMD_VERSION) {
+        // 版本号连点 7 次：开隐藏调试模式（面板在下一轮事件循环里开，
+        // 此刻菜单的 grab 还没完全释放）
+        QTimer::singleShot(0, m_win, [this]() { enableDebugMode(); });
     }
 }
 
@@ -2642,6 +2716,135 @@ void Garden::quitWithFade()
 {
     if (m_win) m_win->fadeOutAndClose();
     else qApp->quit();
+}
+
+// =============================================================================
+//  隐藏调试模式（上游 v3.8.2）
+//
+//  上游是画在全屏分层窗口里的自绘工具条。移植版这里换成独立的 Qt 顶层窗口：
+//  主窗口是"全屏 + 精确输入区域 + 点击穿透"，往里面塞 UI 要把工具条区域并进
+//  输入区域，牵扯每帧的 region 计算，得不偿失。独立窗口有自己的输入区域，
+//  关闭时也不留任何持久状态。
+// =============================================================================
+void Garden::enableDebugMode()
+{
+    if (m_debugMode) return;
+    m_debugMode = true;
+
+    if (!m_dbgBar) {
+        QWidget* bar = new QWidget(nullptr, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
+                                              | Qt::Tool | Qt::NoDropShadowWindowHint);
+        bar->setAttribute(Qt::WA_TranslucentBackground, true);
+        bar->setAttribute(Qt::WA_DeleteOnClose, false);
+
+        QWidget* panel = new QWidget(bar);
+        panel->setStyleSheet(QStringLiteral(
+            "background-color: rgb(26,20,16);"
+            "border: 2px solid rgb(196,148,92);"));
+
+        QHBoxLayout* row = new QHBoxLayout(panel);
+        row->setContentsMargins(8, 8, 8, 8);
+        row->setSpacing(8);
+
+        QFont bf;
+        bf.setPixelSize(14);
+        bf.setFamily(QStringLiteral("Noto Sans CJK SC"));
+
+        struct Item { int action; const char* label; bool usable; };
+        // 天气系统还没移植，下雨 / 下雪按钮先摆出来但置灰，
+        // 免得点了没反应让人以为是 bug。
+        const Item items[] = {
+            { DBG_DRY,  "干枯",     true  },
+            { DBG_RAIN, "下雨",     false },
+            { DBG_SNOW, "下雪",     false },
+            { DBG_OFF,  "关闭调试", true  },
+        };
+        for (const Item& it : items) {
+            QToolButton* b = new QToolButton(panel);
+            b->setText(QString::fromUtf8(it.label));
+            b->setFont(bf);
+            b->setFixedSize(110, 36);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setEnabled(it.usable);
+            if (!it.usable) b->setToolTip(QStringLiteral("天气系统尚未移植"));
+            const int act = it.action;
+            QObject::connect(b, &QToolButton::clicked, bar, [this, act]() { doDebugAction(act); });
+            row->addWidget(b);
+        }
+
+        panel->setStyleSheet(panel->styleSheet()
+            + QStringLiteral("QToolButton {"
+                             "  background-color: rgb(74,52,36);"
+                             "  color: rgb(246,240,230);"
+                             "  border: 2px solid rgb(150,112,72);"
+                             "}")
+            + QStringLiteral("QToolButton:hover {"
+                             "  background-color: rgb(122,74,42);"
+                             "  border-color: rgb(236,190,128);"
+                             "}")
+            + QStringLiteral("QToolButton:disabled {"
+                             "  color: rgb(110,96,84);"
+                             "  border-color: rgb(82,64,50);"
+                             "}"));
+
+        QVBoxLayout* outer = new QVBoxLayout(bar);
+        outer->setContentsMargins(0, 0, 0, 0);
+        outer->addWidget(panel);
+
+        bar->adjustSize();
+
+        // 摆在工作区顶部居中，压不到底部面板
+        QScreen* scr = QGuiApplication::primaryScreen();
+        const QRect avail = scr ? scr->availableGeometry() : QRect(0, 0, 1280, 720);
+        bar->move(avail.center().x() - bar->width() / 2, avail.top() + 20);
+
+        m_dbgBar = bar;
+    }
+
+    m_dbgBar->show();
+    m_dbgBar->raise();
+
+    tbpLog(QStringLiteral("debug: mode on (version %1)").arg(VersionText()));
+}
+
+void Garden::disableDebugMode()
+{
+    m_debugMode = false;
+    if (m_dbgBar) {
+        m_dbgBar->hide();
+        m_dbgBar->deleteLater();     // 下次开启重建，不留旧状态
+        m_dbgBar = nullptr;
+    }
+    tbpLog(QStringLiteral("debug: mode off"));
+}
+
+void Garden::doDebugAction(int action)
+{
+    switch (action) {
+    case DBG_DRY:
+        debugDryAll();
+        break;
+    case DBG_RAIN:
+    case DBG_SNOW:
+        // 天气系统未移植，按钮本就置灰；这里兜一层
+        break;
+    case DBG_OFF:
+        disableDebugMode();
+        break;
+    default:
+        break;
+    }
+}
+
+// 把每一盆的泥土水分清零 —— 立刻进入枯萎状态，不用等 30 分钟。
+void Garden::debugDryAll()
+{
+    for (size_t i = 0; i < m_pots.size(); ++i) {
+        m_pots[i].moisture = 0.0f;
+        m_pots[i].waterAnim = 0.0f;
+    }
+    if (m_win) m_win->requestFullRepaint();
+    tbpLog(QStringLiteral("debug: dried all %1 pots").arg(m_pots.size()));
 }
 
 void Garden::updatePot(Pot& p, float dt)
@@ -3287,7 +3490,7 @@ int main(int argc, char** argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("TaskbarPlant"));
     app.setApplicationDisplayName(QStringLiteral("桌面电子盆栽"));
-    app.setApplicationVersion(QStringLiteral("1.3.0-rc.1"));
+    app.setApplicationVersion(VersionText());
     app.setQuitOnLastWindowClosed(false);
 
     // ---- 命令行参数 ----

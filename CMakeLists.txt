@@ -9,9 +9,42 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 6.4 REQUIRED COMPONENTS Widgets Gui)
 find_package(Qt6 6.4 QUIET COMPONENTS DBus)
 
+# -----------------------------------------------------------------------------
+#  版本号
+#
+#  规则：
+#    · 源码正好停在某个 tag 上（正式版 v1.3.0 或预发布 v1.3.0-rc.1）
+#      → 直接用那个 tag 的版本号
+#    · 其余情况（手动构建、CI 的 main 分支构建……）
+#      → 基线版本 + "-canary"
+#
+#  "canary" 的意思是"这棵树不是任何已发布版本"，一眼能看出手上跑的
+#  是不是和 GitHub 上下载的同一个东西。
+#
+#  判定放在构建期（生成 version.h），不是 configure 期 —— configure 会被
+#  CMake 缓存，打完 tag 重新编译不一定触发 configure，版本号会停在旧值。
+# -----------------------------------------------------------------------------
+set(TBP_BASE_VERSION "1.3.0")
+set(TBP_VERSION_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated/tbp_version.h")
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+add_custom_command(
+  OUTPUT "${TBP_VERSION_HEADER}"
+  COMMAND ${CMAKE_COMMAND}
+          -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DOUT_FILE=${TBP_VERSION_HEADER}
+          -DBASE_VERSION=${TBP_BASE_VERSION}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_version.cmake
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/cmake/gen_version.cmake
+  COMMENT "Detecting version (git tag)"
+  VERBATIM)
+
 # kwin_bridge.js 打进 Qt 资源，程序运行时再释放到 ~/.local/share 交给 KWin 加载
 add_executable(taskbarplant src/main.cpp src/resources.qrc)
 target_link_libraries(taskbarplant PRIVATE Qt6::Widgets Qt6::Gui)
+add_custom_target(tbp_version_header DEPENDS "${TBP_VERSION_HEADER}")
+add_dependencies(taskbarplant tbp_version_header)
+target_include_directories(taskbarplant PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 if(Qt6DBus_FOUND)
     target_link_libraries(taskbarplant PRIVATE Qt6::DBus)
