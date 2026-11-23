@@ -221,12 +221,14 @@ static void FillPixelEllipse(QPainter& g, const QColor& col,
 static void DrawPixelLeaf(QPainter& g, float x, float y, int dir,
                           float len, float span, float halfW,
                           const QColor& col, const QColor* vein,
-                          const QColor* shade = nullptr)
+                          const QColor* shade = nullptr,
+                          float tipLean = 0.0f)
 {
     int rows = (int)floorf(len / PIX + 0.5f);
     if (rows < 3) rows = 3;
     const float y0 = SnapPx(y);
 
+    float prevCx = SnapPx(x);   // 上一行的横向位置，用来保证阶梯连续
     for (int i = 0; i < rows; ++i) {
         const float k = (float)(i + 1) / (float)rows;
 
@@ -239,7 +241,18 @@ static void DrawPixelLeaf(QPainter& g, float x, float y, int dir,
 
         // 横向：匀速斜伸。上游原文写的是分段斜率（前 70% 与后 30% 各一段），
         // 但两段的系数相乘后都化简成 k，实际渲染就是匀速，这里如实照搬。
-        const float cx = SnapPx(x + (float)dir * span * k);
+        // tipLean 按 k² 加权：叶根不动，越靠叶尖摆得越多。
+        // 直接加在 x 上（上游的写法）等于整片叶子横向瞬移，看起来是抽搐而不是颤动。
+        float cx = SnapPx(x + (float)dir * (span * k + tipLean * k * k));
+
+        // 每行横向最多前移一格。span 不是 4 的倍数时，最后一行 snap 会跳 8px，
+        // 而叶尖只有一格宽，于是叶片在末端断开 2px —— 看起来像"叶尖掉了一块"。
+        // 夹住之后阶梯一定连续，代价是叶子略短一点点。
+        if (i > 0) {
+            if (cx - prevCx >  PIX) cx = prevCx + PIX;
+            if (cx - prevCx < -PIX) cx = prevCx - PIX;
+        }
+        prevCx = cx;
 
         // 纵向：前 70% 每行上爬一格，后 30% 每行只爬半格，叶尖放平下垂
         // （用 rows*PIX 而不是 len：两者在 g_scale=1 时相等，缩放时前者不会错位）
@@ -338,16 +351,20 @@ static void DrawLeaf(QPainter& g, float soilY, float height, float p, float sway
 {
     const QColor leaf  = C(100, 178, 72);
     const QColor vein  = C(64, 126, 48);
-    const QColor shade = C(56, 112, 44);
 
     const float x = sway * 46.0f * g_scale * powf(p, 1.9f);
     const float y = soilY - height * p;
     // 叶片自身的颤动，越靠叶尖幅度越大（p 是叶位在茎上的比例）。
     // 吸附到 4px 网格后表现为整格的轻微跳动 —— 像素画式的"呼吸"。
+    // 幅度收在 1 格以内：再大叶尖就会从叶片主体上断开（末行宽度只有 1 格，
+    // 偏移超过 1 格就没有重叠了）。
     const float flutter = sinf(t * 1.9f + height * 0.11f + (float)dir * 2.0f)
-                        * PIX * 2.0f * p;
-    DrawPixelLeaf(g, x + flutter, y + PIX * 3.0f, dir, 26.0f, 30.0f, 9.0f,
-                  leaf, &vein, &shade);
+                        * PIX * 1.0f * p;
+    // 不用 shade：上游是把半格高（2px）的暗色铺在每一行下方，渲染出来是
+    // 一条条 2px 横纹，整片叶子像排骨，而且破坏了 4px 网格。
+    // 想要暗边的话应该是整片叶子下缘的阶梯轮廓，不是逐行描边。
+    DrawPixelLeaf(g, x, y + PIX * 2.0f, dir, 26.0f, 30.0f, 9.0f,
+                  leaf, &vein, nullptr, flutter);
 }
 
 static void DrawSunflowerHead(QPainter& g, float cx, float cy, float sway, float t)
