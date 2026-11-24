@@ -30,6 +30,8 @@
 #include <QVBoxLayout>
 #include <QToolButton>
 #include <QPushButton>
+#include <QLabel>
+#include <QHBoxLayout>
 #include <QWidgetAction>
 #include <QFrame>
 #include <QMenu>
@@ -75,10 +77,12 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonValue>
-#include <QStandardPaths>
 #endif
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QStandardPaths>
+#include <QRegularExpression>
+#include <QFileInfo>
 
 #include <cmath>
 #include <cstdlib>
@@ -104,6 +108,7 @@ static float g_scale = 1.0f;                  // 当前绘制用的缩放（= g_
 static float g_baseScale = 1.0f;              // 屏幕基准缩放（start() 里定，不含单盆缩放）
 static float g_uprightDelay = 3.0f;           // 摔倒后躺多久再立起来（秒），--upright-delay 可改
 static float g_drySeconds = 1800.0f;          // 泥土从湿透到干透的秒数，默认 30 分钟
+static bool  g_dryFromCli = false;            // --dry-seconds 是否显式给过（优先于 ini）
 static float g_wiltAmount = 0.0f;             // 当前绘制用的枯萎程度 0..1（绘制期临时值）
 static bool  g_wiltEnabled = true;            // false = 关闭枯萎，叶子永远绿
 
@@ -151,6 +156,7 @@ enum PlantType {
 
 enum MenuCmd {
     MENU_CMD_WATER = PLANT_COUNT,   // 浇水
+    MENU_CMD_EDIT,                  // 编辑模式
     MENU_CMD_SCALE_UP,              // 花盆调大
     MENU_CMD_SCALE_DOWN,            // 花盆调小
     MENU_CMD_SPAWN,                 // 放置新花盆
@@ -1319,11 +1325,105 @@ struct Pot {
     float     waterAnim = 0.0f;      // 浇水动画剩余时间（秒）
     float     shedTimer = 0.0f;      // 枯叶掉落的节流计时
     float     windPh = 0.0f;         // 常年微风的相位偏移，每盆错开
+    // 在已保存布局里的槽位；-1 = 运行时新放的盆，还没进过快照
+    int       slot = -1;
 };
 
-static float PotMaxY(float angle, float potScale = 1.0f)
+// 一份"已保存的布局"。ini 里写的就是这个。
+// 自动保存只回写各槽位的水分，位置 / 数量 / 缩放永远不动 ——
+// 拖动、抛掷、放新盆、移除盆，只有编辑模式里点「保存」才会固化。
+struct PotSeed {
+    int   plant    = 0;
+    float x        = 0.0f;
+    float y        = 0.0f;
+    float scale    = 1.0f;
+    float moisture = 1.0f;
+};
+
+// 前向声明：日志函数主体在后面（它依赖一些启动期的东西）
+static void tbpLog(const QString& msg);
+
+// -----------------------------------------------------------------------------
+//  布局文件
+//
+//  上游放在 exe 旁边的 ini；Linux 上按 XDG 放到 ~/.config/taskbarplant/layout.conf。
+//  格式是纯文本，一行一盆：
+//      <植物编号> <x> <y> <缩放> <水分>
+//  外加一行 dry <秒> 记录"从湿透到干透"的时长。
+//
+//  为什么不用 QSettings / JSON：上游就是这么做，格式简单到可以手改，
+//  而且出问题时 cat 一眼就能看出哪盆的位置写坏了。
+// -----------------------------------------------------------------------------
+static QString ConfigPath()
 {
-    const float hw = POT_W * 0.5f * potScale;
+    QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    if (dir.isEmpty()) dir = QDir::homePath() + QStringLiteral("/.config");
+    return dir + QStringLiteral("/taskbarplant/layout.conf");
+}
+
+static void LoadConfigFile(std::vector<PotSeed>& layout, float* drySeconds)
+{
+    layout.clear();
+    QFile f(ConfigPath());
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return;
+
+    QTextStream in(&f);
+    while (!in.atEnd()) {
+        QString line = in.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#')) continue;
+
+        if (line.startsWith(QStringLiteral("dry"))) {
+            bool ok = false;
+            const float d = line.mid(3).trimmed().toFloat(&ok);
+            if (ok && drySeconds) *drySeconds = Clampf(d, 60.0f, 86400.0f);
+            continue;
+        }
+
+        const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")),
+                                            Qt::SkipEmptyParts);
+        if (parts.size() < 3) continue;
+
+        PotSeed s;
+        bool ok1 = false, ok2 = false, ok3 = false;
+        s.plant = parts[0].toInt(&ok1);
+        s.x     = parts[1].toFloat(&ok2);
+        s.y     = parts[2].toFloat(&ok3);
+        if (!ok1 || !ok2 || !ok3) continue;
+        if (s.plant < 0 || s.plant >= PLANT_COUNT) s.plant = 0;
+
+        bool ok4 = false, ok5 = false;
+        if (parts.size() > 3) s.scale    = parts[3].toFloat(&ok4);
+        if (parts.size() > 4) s.moisture = parts[4].toFloat(&ok5);
+        s.scale    = Clampf(ok4 ? s.scale : 1.0f, POT_SCALE_MIN, POT_SCALE_MAX);
+        s.moisture = Clampf(ok5 ? s.moisture : 1.0f, 0.0f, 1.0f);
+        layout.push_back(s);
+    }
+}
+
+static void SaveConfigFile(const std::vector<PotSeed>& layout, float drySeconds)
+{
+    const QString path = ConfigPath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        tbpLog(QStringLiteral("config: 写不进去 %1").arg(path));
+        return;
+    }
+    QTextStream out(&f);
+    out << "# TaskbarPlant: plant x y scale moisture\n";
+    out << "dry " << (int)drySeconds << "\n";
+    for (size_t i = 0; i < layout.size(); ++i) {
+        const PotSeed& s = layout[i];
+        out << s.plant << ' ' << QString::number(s.x, 'f', 1) << ' '
+            << QString::number(s.y, 'f', 1) << ' '
+            << QString::number(s.scale, 'f', 3) << ' '
+            << QString::number(s.moisture, 'f', 3) << '\n';
+    }
+}
+
+static float PotMaxY(float angle, float potScale = 1.0f)
+{    const float hw = POT_W * 0.5f * potScale;
     const float hh = POT_H * 0.5f * potScale;
     const float c = cosf(angle);
     const float s = sinf(angle);
@@ -2248,6 +2348,14 @@ public:
     bool debugMode() const { return m_debugMode; }
     void debugDryAll();
 
+    // ---- 编辑模式（上游 v3.5）：场景改动只在内存里，点「保存」才写盘 ----
+    bool editMode() const { return m_editMode; }
+    void setEditMode(bool on);
+    void editAddPot();          // + 新花盆
+    void editCycleDry();        // 干枯时长档位循环
+    void editSave();            // 把当前场景固化成布局快照
+    void saveLayout(bool manual);   // 写 ini；manual=false 只回写水分
+
 private:
     void updatePot(Pot& p, float dt);
     void updatePhysics(float dt);
@@ -2266,9 +2374,19 @@ private:
     bool m_layoutReady = false;
     QRect m_dirty;
 
+    // 布局快照：ini 里写的就是它。自动保存只改各槽位的 moisture。
+    std::vector<PotSeed> m_savedLayout;
+
     // 隐藏调试模式：工具条是个独立顶层窗口，不塞进全屏穿透层
     bool      m_debugMode = false;
     QWidget*  m_dbgBar    = nullptr;
+
+    // 编辑模式
+    bool      m_editMode   = false;
+    QWidget*  m_editBar    = nullptr;
+    QLabel*   m_editStatus = nullptr;
+    QToolButton* m_dryBtn  = nullptr;
+    float     m_saveTimer  = 0.0f;
 };
 
 // -----------------------------------------------------------------------------
@@ -2730,6 +2848,7 @@ void PotWindow::populateMenu(QMenu& menu, int pot, int* chosenOut)
     struct Cmd { int id; const char* text; };
     const Cmd cmds[] = {
         { MENU_CMD_WATER,      "浇水" },
+        { MENU_CMD_EDIT,       "编辑模式" },
         { MENU_CMD_SCALE_UP,   "花盆调大" },
         { MENU_CMD_SCALE_DOWN, "花盆调小" },
         { MENU_CMD_SPAWN,      "放置新花盆" },
@@ -3060,16 +3179,49 @@ void Garden::start()
     }
 
     if (!m_layoutReady) {
-        spawnPot((float)(m_winW / 2), m_floorY, PLANT_SUNFLOWER);
-        m_pots.back().body.vy = 0.0f;
+        // 布局从 ini 恢复；命令行 --dry-seconds 的优先级高于 ini 里的 dry
+        const float cliDry = g_drySeconds;
+        const bool  dryFromCli = g_dryFromCli;
+        LoadConfigFile(m_savedLayout, &g_drySeconds);
+        if (dryFromCli) g_drySeconds = cliDry;
+
+        if (!m_savedLayout.empty()) {
+            for (size_t i = 0; i < m_savedLayout.size(); ++i) {
+                const PotSeed& s = m_savedLayout[i];
+                spawnPot(s.x, s.y, (PlantType)s.plant);
+                Pot& np = m_pots.back();
+                np.body.vy = 0.0f;          // 恢复的盆不要"跳"一下
+                np.scale = Clampf(s.scale, POT_SCALE_MIN, POT_SCALE_MAX);
+                np.moisture = Clampf(s.moisture, 0.0f, 1.0f);
+                np.slot = (int)i;           // 绑定布局槽位，自动保存靠它回写水分
+                np.prevLowestAbs = np.body.y;
+            }
+            tbpLog(QStringLiteral("config: 从 %1 恢复 %2 盆，dry=%3s")
+                       .arg(ConfigPath()).arg(m_pots.size()).arg((int)g_drySeconds));
+        } else {
+            spawnPot((float)(m_winW / 2), m_floorY, PLANT_SUNFLOWER);
+            Pot& np = m_pots.back();
+            np.body.vy = 0.0f;
+            np.slot = 0;                    // 首次运行的默认盆视为已保存
+
+            PotSeed s;
+            s.plant = PLANT_SUNFLOWER;
+            s.x = np.body.x;
+            s.y = np.body.y;
+            s.scale = np.scale;
+            s.moisture = np.moisture;
+            m_savedLayout.push_back(s);
+            tbpLog(QStringLiteral("config: 没有布局文件（%1），使用默认单盆")
+                       .arg(ConfigPath()));
+        }
 
         // 调试钩子：TBP_POT_X / TBP_POT_Y 指定初始位置（用于验证承托与跟随，
-        // 不需要模拟鼠标操作）
-        if (qEnvironmentVariableIsSet("TBP_POT_X")) {
-            m_pots.back().body.x = qgetenv("TBP_POT_X").toFloat();
-        }
-        if (qEnvironmentVariableIsSet("TBP_POT_Y")) {
-            m_pots.back().body.y = qgetenv("TBP_POT_Y").toFloat();
+        // 不需要模拟鼠标操作）。只动第一个盆。
+        if (!m_pots.empty()) {
+            if (qEnvironmentVariableIsSet("TBP_POT_X"))
+                m_pots[0].body.x = qgetenv("TBP_POT_X").toFloat();
+            if (qEnvironmentVariableIsSet("TBP_POT_Y"))
+                m_pots[0].body.y = qgetenv("TBP_POT_Y").toFloat();
         }
 
         m_layoutReady = true;
@@ -3092,6 +3244,8 @@ void Garden::spawnPot(float x, float y, PlantType plant)
     p.prevLowestAbs = p.body.y;
     // 每盆风相位错开，否则多盆会整齐划一地摇，很假
     p.windPh = (float)(rand() % 1000) * 0.00628f;      // 0 ~ 2π
+    // 运行时新放的盆还没有进过布局快照
+    p.slot = -1;
     m_pots.push_back(p);
 }
 
@@ -3202,6 +3356,8 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
             p->waterAnim = WATER_DURATION;
             p->swayVel += 6.0f;      // 一盆水浇下去的那一下
         }
+    } else if (idx == MENU_CMD_EDIT) {
+        setEditMode(!m_editMode);
     } else if (idx == MENU_CMD_SCALE_UP || idx == MENU_CMD_SCALE_DOWN) {
         if (p) {
             float ns = p->scale + ((idx == MENU_CMD_SCALE_UP) ? POT_SCALE_STEP : -POT_SCALE_STEP);
@@ -3239,6 +3395,9 @@ void Garden::applyMenuChoice(int idx, float mx, float my)
 
 void Garden::quitWithFade()
 {
+    // 退出时补一次自动保存（只回写水分，不动布局）
+    if (!m_editMode && !m_savedLayout.empty()) saveLayout(false);
+
     if (m_win) m_win->fadeOutAndClose();
     else qApp->quit();
 }
@@ -3404,6 +3563,206 @@ void Garden::debugDryAll()
     tbpLog(QStringLiteral("debug: dried all %1 pots").arg(m_pots.size()));
 }
 
+// =============================================================================
+//  编辑模式（上游 v3.5，持久化在 v3.8.3 重做过）
+//
+//  规则很简单，但很容易做错：
+//    · 拖动 / 抛掷 / 放新盆 / 移除盆，改动**只在内存里**
+//    · 每 5 秒的自动保存**只回写各槽位的水分**，位置、数量、缩放一概不动
+//    · 只有编辑模式里点「保存」，才把当前场景整体固化成布局快照
+//  不这么分的话，随手把花盆甩到屏幕中间，重启后就永远待在那儿了。
+// =============================================================================
+void Garden::saveLayout(bool manual)
+{
+    if (manual) {
+        m_savedLayout.clear();
+        for (size_t i = 0; i < m_pots.size(); ++i) {
+            const Pot& p = m_pots[i];
+            PotSeed s;
+            s.plant    = (int)p.plant;
+            s.x        = p.body.x;
+            s.y        = p.body.y;
+            s.scale    = p.scale;
+            s.moisture = p.moisture;
+            m_savedLayout.push_back(s);
+            m_pots[i].slot = (int)i;      // 每盆重新绑定到新布局的槽位
+        }
+    } else {
+        for (size_t i = 0; i < m_pots.size(); ++i) {
+            const Pot& p = m_pots[i];
+            if (p.slot >= 0 && p.slot < (int)m_savedLayout.size())
+                m_savedLayout[p.slot].moisture = p.moisture;
+        }
+    }
+    SaveConfigFile(m_savedLayout, g_drySeconds);
+}
+
+// 干枯时长档位（上游同一组）：5 分钟 ~ 4 小时
+static const float kDrySteps[] = { 300.0f, 900.0f, 1800.0f, 3600.0f, 7200.0f, 14400.0f };
+static const int   kDryStepCount = (int)(sizeof(kDrySteps) / sizeof(kDrySteps[0]));
+
+static QString DryLabel()
+{
+    const int ds = (int)g_drySeconds;
+    if (ds >= 60 && ds % 60 == 0)
+        return QStringLiteral("干枯 %1 分钟").arg(ds / 60);
+    return QStringLiteral("干枯 %1 秒").arg(ds);
+}
+
+// 工具条统一摆位：编辑工具条在最上面，调试工具条排在它下面，避免互相压住
+static void PlaceBar(QWidget* w, int yTop)
+{
+    if (!w) return;
+    w->adjustSize();
+    QScreen* scr = QGuiApplication::primaryScreen();
+    const QRect avail = scr ? scr->availableGeometry() : QRect(0, 0, 1280, 720);
+    w->move(avail.center().x() - w->width() / 2, avail.top() + yTop);
+}
+
+void Garden::setEditMode(bool on)
+{
+    if (m_editMode == on) return;
+    m_editMode = on;
+
+    if (on) {
+        if (!m_editBar) {
+            QWidget* bar = new QWidget(nullptr, Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint
+                                                  | Qt::Tool | Qt::NoDropShadowWindowHint);
+            bar->setAttribute(Qt::WA_TranslucentBackground, true);
+
+            QWidget* panel = new QWidget(bar);
+            panel->setObjectName(QStringLiteral("editPanel"));
+            panel->setStyleSheet(QStringLiteral(
+                "#editPanel {"
+                "  background-color: rgb(26,20,16);"
+                "  border: 2px solid rgb(196,148,92);"
+                "}"
+                "QToolButton {"
+                "  background-color: rgb(74,52,36);"
+                "  color: rgb(242,234,222);"
+                "  border: 2px solid rgb(150,112,72);"
+                "  padding: 0px;"
+                "}"
+                "QToolButton:hover {"
+                "  background-color: rgb(122,74,42);"
+                "  border-color: rgb(236,190,128);"
+                "  color: rgb(255,248,236);"
+                "}"
+                "QToolButton:pressed { background-color: rgb(56,38,26); }"
+                "QLabel { color: rgb(246,240,230); background: transparent; border: none; }"));
+
+            QVBoxLayout* col = new QVBoxLayout(panel);
+            col->setContentsMargins(8, 8, 8, 8);
+            col->setSpacing(6);
+
+            QHBoxLayout* row = new QHBoxLayout;
+            row->setSpacing(8);
+
+            QFont bf;
+            bf.setPixelSize(14);
+            bf.setFamily(QStringLiteral("Noto Sans CJK SC"));
+
+            auto mk = [&](const QString& text, int w) {
+                QToolButton* b = new QToolButton(panel);
+                b->setText(text);
+                b->setFont(bf);
+                b->setFixedSize(w, 36);
+                b->setCursor(Qt::PointingHandCursor);
+                row->addWidget(b);
+                return b;
+            };
+
+            QToolButton* addBtn = mk(QStringLiteral("+ 新花盆"), 110);
+            m_dryBtn            = mk(DryLabel(), 120);
+            QToolButton* saveBtn = mk(QStringLiteral("保存"), 90);
+            QToolButton* doneBtn = mk(QStringLiteral("完成"), 90);
+
+            col->addLayout(row);
+
+            // 状态行：保存结果 / "标题栏上的花盆只能存在任务栏" 的提醒
+            m_editStatus = new QLabel(bar);
+            m_editStatus->setAlignment(Qt::AlignHCenter);
+            m_editStatus->setFont(bf);
+            m_editStatus->setStyleSheet(QStringLiteral("color: rgb(246,214,160);"));
+            m_editStatus->setVisible(false);
+            col->addWidget(m_editStatus);
+
+            QObject::connect(addBtn,  &QToolButton::clicked, bar, [this]() { editAddPot(); });
+            QObject::connect(m_dryBtn, &QToolButton::clicked, bar, [this]() { editCycleDry(); });
+            QObject::connect(saveBtn, &QToolButton::clicked, bar, [this]() { editSave(); });
+            QObject::connect(doneBtn, &QToolButton::clicked, bar, [this]() { setEditMode(false); });
+
+            QVBoxLayout* outer = new QVBoxLayout(bar);
+            outer->setContentsMargins(0, 0, 0, 0);
+            outer->addWidget(panel);
+
+            m_editBar = bar;
+        }
+        m_dryBtn->setText(DryLabel());
+        PlaceBar(m_editBar, 20);
+        m_editBar->show();
+        m_editBar->raise();
+        if (m_dbgBar) PlaceBar(m_dbgBar, 20 + m_editBar->height() + 8);
+        tbpLog(QStringLiteral("edit: mode on"));
+
+        // TBP_EDIT_PNG=<path>：把工具条渲染成图，无头检查配色/文案
+        const QByteArray shot = qgetenv("TBP_EDIT_PNG");
+        if (!shot.isEmpty()) {
+            m_editBar->adjustSize();
+            m_editBar->grab().save(QString::fromLocal8Bit(shot));
+        }
+    } else {
+        if (m_editBar) m_editBar->hide();
+        if (m_editStatus) m_editStatus->setVisible(false);
+        if (m_dbgBar) PlaceBar(m_dbgBar, 20);
+        tbpLog(QStringLiteral("edit: mode off"));
+    }
+
+    if (m_win) m_win->requestFullRepaint();
+}
+
+void Garden::editAddPot()
+{
+    // 屏幕中间附近随机撒一盆
+    const float cx = (float)m_winW * 0.5f + (float)((rand() % 401) - 200);
+    spawnPot(cx, m_floorY, (PlantType)(rand() % PLANT_COUNT));
+    if (m_win) m_win->requestFullRepaint();
+    tbpLog(QStringLiteral("edit: spawned pot, now %1").arg(m_pots.size()));
+}
+
+void Garden::editCycleDry()
+{
+    int cur = 2;                       // 找不到就按默认 30 分钟算
+    for (int i = 0; i < kDryStepCount; ++i)
+        if (fabsf(kDrySteps[i] - g_drySeconds) < 1.0f) { cur = i; break; }
+    g_drySeconds = kDrySteps[(cur + 1) % kDryStepCount];
+    if (m_dryBtn) m_dryBtn->setText(DryLabel());
+}
+
+void Garden::editSave()
+{
+    saveLayout(true);
+
+    // ini 只记窗口坐标：站在标题栏上的花盆，重启后会落回任务栏
+    bool onTitleBar = false;
+    for (size_t i = 0; i < m_pots.size(); ++i) {
+        if (m_pots[i].surfaceY < m_floorY - 1.0f) { onTitleBar = true; break; }
+    }
+
+    if (m_editStatus) {
+        m_editStatus->setText(onTitleBar
+            ? QStringLiteral("已保存 · 标题栏上的花盆重启后会落回任务栏")
+            : QStringLiteral("已保存"));
+        m_editStatus->setVisible(true);
+        QTimer::singleShot(2600, m_editStatus, [this]() {
+            if (m_editStatus) m_editStatus->setVisible(false);
+        });
+    }
+    if (m_dryBtn) m_dryBtn->setText(DryLabel());
+    tbpLog(QStringLiteral("edit: saved %1 pots, dry=%2s")
+               .arg(m_savedLayout.size()).arg((int)g_drySeconds));
+}
+
 void Garden::updatePot(Pot& p, float dt)
 {
     Body& b = p.body;
@@ -3411,12 +3770,16 @@ void Garden::updatePot(Pot& p, float dt)
     const float hh = POT_H * 0.5f * p.scale;
 
     // ---- 水分：平时慢慢蒸发，浇水后快速吸饱 ----
+    // 编辑模式暂停蒸发：摆位置的时候眼看着植物变枯没道理，
+    // 而且这时候水分也不该被写进快照。
     if (p.waterAnim > 0.0f) {
         p.waterAnim -= dt;
         if (p.waterAnim < 0.0f) p.waterAnim = 0.0f;
         p.moisture = Clampf(p.moisture + dt / 1.2f, 0.0f, 1.0f);
         // 晃动只在浇下的那一下给一次冲量（见 applyMenuChoice），
         // 之后交给弹簧自然衰减。持续正弦激励会让人觉得一直在抖。
+    } else if (m_editMode) {
+        // 什么都不做
     } else if (g_wiltEnabled) {
         p.moisture = Clampf(p.moisture - dt / g_drySeconds, 0.0f, 1.0f);
     } else {
@@ -3424,7 +3787,7 @@ void Garden::updatePot(Pot& p, float dt)
     }
 
     // ---- 缺水：从植株上不断掉落枯叶碎片 ----
-    if (g_wiltEnabled && p.moisture < DRY_THRESHOLD && m_wilt.size() < 240) {
+    if (!m_editMode && g_wiltEnabled && p.moisture < DRY_THRESHOLD && m_wilt.size() < 240) {
         p.shedTimer -= dt;
         if (p.shedTimer <= 0.0f) {
             const float dry = (DRY_THRESHOLD - p.moisture) / DRY_THRESHOLD;
@@ -3697,6 +4060,16 @@ void Garden::updatePhysics(float dt)
 void Garden::tick()
 {
     m_time += DT;
+
+    // 自动保存：每 5 秒一次，但**只回写水分**（位置/数量/缩放不动）。
+    // 编辑模式里不写盘 —— 摆到一半的东西不该落进 ini。
+    if (!m_editMode) {
+        m_saveTimer += DT;
+        if (m_saveTimer >= 5.0f) {
+            m_saveTimer = 0.0f;
+            saveLayout(false);
+        }
+    }
 
     // ------------------------------------------------------------------------
     //  兜底：左键已经松开了，但花盆还标记着"被拖拽" —— 强制结束。
@@ -4166,9 +4539,13 @@ int main(int argc, char** argv)
 
         g_wiltEnabled = !cmd.isSet(optNoWilt);
 
+        // 注意：cmd.value() 在参数没给时返回的是默认值 "1800"，
+        // 所以必须再判一次 isSet —— 否则默认值会一直被当成"用户显式指定"，
+        // 把 ini 里存的 dry 顶掉。
         float dry = cmd.value(optDry).toFloat(&ok);
-        if (ok && dry >= 5.0f && dry <= 86400.0f) {
+        if (ok && cmd.isSet(optDry) && dry >= 5.0f && dry <= 86400.0f) {
             g_drySeconds = dry;
+            g_dryFromCli = true;
         } else if (ok) {
             fprintf(stderr, "[tbp] --dry-seconds 需要 5~86400 之间的秒数，已用默认 1800\n");
         }
@@ -4257,6 +4634,10 @@ int main(int argc, char** argv)
     // 没有这个开关的话，每次调样式都得手动右键点七下，没法自动化验证。
     if (qEnvironmentVariableIsSet("TBP_DEBUG_BAR"))
         garden.enableDebugMode();
+
+    // 开发用：TBP_EDIT=1 直接进编辑模式
+    if (qEnvironmentVariableIsSet("TBP_EDIT"))
+        garden.setEditMode(true);
 
     QTimer timer;
     QObject::connect(&timer, &QTimer::timeout, [&garden]() { garden.tick(); });

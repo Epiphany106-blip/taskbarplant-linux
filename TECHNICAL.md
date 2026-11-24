@@ -306,6 +306,65 @@ v3.8.3 的两个修正也一并照搬了：
 
 v3.8 改了规则：**花盆稳稳站在任务栏或标题栏上时不画投影**，只有拿在手里 / 落在半空（`lowest < surfaceY - 8px`）才画。投影位置仍用 `shadowY`（正下方最近的平面），这是移植版早就修过的：用 `surfaceY` 的话，花盆悬在窗口上方时投影会跑到屏幕最底部的面板上。
 
+## 编辑模式：只有点「保存」才动布局
+
+上游 v3.5 的功能，持久化在 v3.8.3 重做过。规则一句话：**自动保存只回写水分，位置/数量/大小永远不动；要改布局必须进编辑模式点「保存」。**
+
+不这么分的话，随手把花盆甩到屏幕中间，5 秒后自动保存就把它固化下来，重启后那盆永远待在半空。
+
+数据结构上靠一个槽位绑定：
+
+```cpp
+struct PotSeed { int plant; float x, y, scale, moisture; };
+std::vector<PotSeed> m_savedLayout;   // ini 里写的就是这份快照
+int Pot::slot;                        // 该盆在快照里的下标；-1 = 运行时新放、还没保存
+```
+
+- 自动保存：`m_savedLayout[p.slot].moisture = p.moisture`，槽位无效（-1）直接跳过。
+- 手动保存：清空快照，按当前花盆顺序重建，同时把每盆的 `slot` 重置成新下标。
+
+于是"编辑模式里加了新盆但没点保存"这个中间状态是自洽的：新盆 `slot = -1`，自动保存不会把它写进去，重启就消失——和上游一致。
+
+### 配置格式
+
+`~/.config/taskbarplant/layout.conf`，一行一盆：
+
+```
+# TaskbarPlant: plant x y scale moisture
+dry 1800
+1 400.0 754.0 1.000 0.997
+```
+
+`dry <秒>` 是"从湿透到干透"的时长，编辑模式里的「干枯 N 分钟」改的就是它。用纯文本而不是 QSettings/JSON，是因为出问题时 `cat` 一眼就能看出哪盆坐标写坏了。
+
+### 一个很阴的坑：`cmd.value()` 会返回默认值
+
+移植完发现 ini 里存的 `dry 900` 每次启动都被改回 1800。原因：
+
+```cpp
+float dry = cmd.value(optDry).toFloat(&ok);   // 参数没给时返回默认值 "1800"
+if (ok && dry >= 5.0f && dry <= 86400.0f) {   // 永远成立
+    g_drySeconds = dry;                        // 于是永远覆盖 ini
+}
+```
+
+`QCommandLineParser::value()` 在参数未出现时返回的是**选项的默认值**，不是空串。要用默认值判断"用户到底给没给"，必须再判一次 `cmd.isSet(optDry)`。
+
+加上 `isSet` 之后，优先级才是对的：命令行 > ini > 内置默认。
+
+### 编辑模式暂停蒸发
+
+`updatePot()` 里水分那一段多了一个分支：
+
+```cpp
+if (p.waterAnim > 0.0f)      { ... }   // 浇水动画期间吸饱
+else if (m_editMode)         { }       // 摆位置的时候不蒸发
+else if (g_wiltEnabled)      { 蒸发 }
+else                         { moisture = 1.0f; }
+```
+
+缺水掉枯叶同样加 `!m_editMode`。不然摆到一半植物开始掉叶子，看着像坏了。
+
 ## 单盆缩放：不改函数签名的代价
 
 十七种植物的绘制函数都用全局 `g_scale` 换算 `PIX`。要给单个花盆加缩放，最干净的办法是不动它们——绘制前后临时把 `g_scale` 换成 `g_baseScale * p.scale`，画完还原：
