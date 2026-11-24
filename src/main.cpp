@@ -2438,8 +2438,11 @@ void PotWindow::updateInputMask()
     if (g_precip > 0.02f) {
         RebuildWeatherZones(pots, m_garden->winW(), m_garden->floorY());
         for (const WeatherZone& z : g_zones) {
-            cur = cur.united(QRect((int)z.l - 4, (int)z.top - 46,
-                                   (int)(z.r - z.l) + 8, 50));
+            // 云横向会伸出区域：凸包中心最远偏到 z.l-6 / z.r+6，半径最大 28
+            // → 左右各留 40 才盖得住。只留 4px 的话，露在外面的云瓣永远
+            // 进不了脏矩形，雨停后那几块就一直挂在那儿褪不掉。
+            cur = cur.united(QRect((int)z.l - 40, (int)z.top - 46,
+                                   (int)(z.r - z.l) + 80, 50));
         }
     }
 
